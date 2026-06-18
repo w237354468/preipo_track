@@ -1,0 +1,35 @@
+# Environment & secrets
+.env
+.env.*
+
+# Bot runtime state files
+ma_bot_state.json
+ma_bot_trades.json
+ma_bot.log
+ma_bot_output.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+dist/
+build/
+venv/
+.venv/
+
+# Data cache
+data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node (if any)
+node_modules/

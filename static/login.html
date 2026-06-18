@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - OKX 实时监控系统</title>
+    <!-- Google Fonts Inter -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="styles.css?v=20260617_4">
+</head>
+<body style="display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; background: radial-gradient(ellipse at top, var(--bg-gradient-start), var(--bg-gradient-end));">
+    <div id="app" v-cloak style="max-width: 420px; width: 90%; margin: 0;">
+        <n-config-provider :theme="darkTheme">
+            <n-message-provider>
+                <login-form-wrapper></login-form-wrapper>
+            </n-message-provider>
+        </n-config-provider>
+    </div>
+    
+    <!-- Load Vue 3 and Naive UI locally -->
+    <script src="vue.global.js?v=20260617_4"></script>
+    <script src="naive-ui.js?v=20260617_4"></script>
+    <script>
+        const { createApp, ref } = Vue;
+        const { darkTheme } = naive;
+        
+        const LoginFormWrapper = {
+            template: `
+                <n-card class="login-card" style="background: rgba(22, 28, 45, 0.45); border: 1px solid rgba(255, 255, 255, 0.06); border-radius: 16px; backdrop-filter: blur(20px); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);">
+                    <div class="login-header" style="text-align: center; margin-bottom: 30px;">
+                        <i class="fa-solid fa-lock login-logo" style="font-size: 44px; color: var(--accent-blue); margin-bottom: 16px;"></i>
+                        <h2 style="color: #ffffff; font-size: 22px; margin-bottom: 8px; font-weight: 700;">系统安全登录</h2>
+                        <p style="color: var(--text-secondary); font-size: 13px;">请输入用户名和密码以访问监控面板</p>
+                    </div>
+                    
+                    <n-form @submit.prevent="handleLogin" label-placement="top">
+                        <n-form-item label="用户名">
+                            <template #label><span style="color: var(--text-secondary); font-weight: 500; font-size: 12px; letter-spacing: 0.5px;"><i class="fa-solid fa-user" style="margin-right: 6px; color: var(--accent-blue);"></i>用户名</span></template>
+                            <n-input v-model:value="username" placeholder="请输入用户名" size="large" required autofocus />
+                        </n-form-item>
+                        
+                        <n-form-item label="密码">
+                            <template #label><span style="color: var(--text-secondary); font-weight: 500; font-size: 12px; letter-spacing: 0.5px;"><i class="fa-solid fa-key" style="margin-right: 6px; color: var(--accent-blue);"></i>密码</span></template>
+                            <n-input type="password" show-password-on="mousedown" v-model:value="password" placeholder="请输入密码" size="large" required />
+                        </n-form-item>
+                        
+                        <n-button type="primary" attr-type="submit" :loading="loading" block size="large" style="margin-top: 16px; background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border: none; font-weight: 600;">
+                            安全登录
+                        </n-button>
+                    </n-form>
+                    
+                    <n-alert v-if="errorMsg" type="error" show-icon style="margin-top: 16px; background: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.25);">
+                        {{ errorMsg }}
+                    </n-alert>
+                </n-card>
+            `,
+            setup() {
+                const username = ref('');
+                const password = ref('');
+                const loading = ref(false);
+                const errorMsg = ref('');
+                const message = window.naive.useMessage();
+                
+                const path = window.location.pathname;
+                const segments = path.split('/');
+                segments.pop();
+                const prefix = segments.join('/');
+                
+                const handleLogin = async () => {
+                    loading.value = true;
+                    errorMsg.value = '';
+                    
+                    try {
+                        const res = await fetch(prefix + '/api/login', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ username: username.value.trim(), password: password.value })
+                        });
+                        
+                        const data = await res.json();
+                        if (data.success) {
+                            message.success('登录成功，正在跳转...');
+                            setTimeout(() => {
+                                window.location.href = prefix + '/';
+                            }, 800);
+                        } else {
+                            errorMsg.value = data.message || '用户名或密码错误';
+                            message.error(errorMsg.value);
+                        }
+                    } catch (err) {
+                        console.error("Login request failed:", err);
+                        errorMsg.value = '服务器连接失败，请重试';
+                        message.error(errorMsg.value);
+                    } finally {
+                        loading.value = false;
+                    }
+                };
+                
+                return {
+                    username,
+                    password,
+                    loading,
+                    errorMsg,
+                    handleLogin
+                };
+            }
+        };
+        
+        const app = createApp({
+            components: {
+                LoginFormWrapper
+            },
+            setup() {
+                return {
+                    darkTheme
+                };
+            }
+        });
+        app.use(naive);
+        app.mount('#app');
+    </script>
+</body>
+</html>
