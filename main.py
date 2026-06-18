@@ -66,8 +66,7 @@ def get_okx_headers(api_key: str, secret_key: str, passphrase: str, method: str,
     }
     
     if simulated:
-        headers["x-simulated-auth"] = "1"
-        headers["OK-ACCESS-SIMULATED"] = "1"
+        headers["x-simulated-only"] = "1"
         
     return headers
 

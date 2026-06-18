@@ -113,8 +113,7 @@ def get_okx_headers(method: str, request_path: str, body: str = "") -> dict:
         "OK-ACCESS-PASSPHRASE": PASSPHRASE,
     }
     if SIMULATED:
-        headers["x-simulated-auth"] = "1"
-        headers["OK-ACCESS-SIMULATED"] = "1"
+        headers["x-simulated-only"] = "1"
     return headers
 
 def private_request(method: str, path: str, params: dict = None, json_data: dict = None):
@@ -235,8 +234,8 @@ def main_loop():
             if pos_res and pos_res.get("code") == "0":
                 data = pos_res.get("data", [])
                 for p in data:
-                    if p.get("instId") == inst_id:
-                        p_sz = float(p.get("pos", "0"))
+                    if p.get("instId") == inst_id and p.get("mgnMode") == "cross":
+                        p_sz = float(p.get("pos", "0") or "0")
                         p_side = p.get("posSide")
                         
                         if p_side == "long" and p_sz > 0:
@@ -254,10 +253,10 @@ def main_loop():
                                 pos_sz = abs(p_sz)
 
                         if pos_side != "flat":
-                            pos_avg_px = float(p.get("avgPx", "0"))
-                            pos_upl = float(p.get("upl", "0"))
-                            pos_upl_ratio = float(p.get("uplRatio", "0")) * 100
-                            pos_margin = float(p.get("margin", "0"))
+                            pos_avg_px = float(p.get("avgPx", "0") or "0")
+                            pos_upl = float(p.get("upl", "0") or "0")
+                            pos_upl_ratio = float(p.get("uplRatio", "0") or "0") * 100
+                            pos_margin = float(p.get("margin", "0") or "0")
                             pos_liq_px = float(p.get("liqPx", "0") or "0")
                             
             logger.info(f"Position: side={pos_side} | size={pos_sz} | avgPx={pos_avg_px:.2f} | upl={pos_upl:.4f} | uplRatio={pos_upl_ratio:.2f}%")
