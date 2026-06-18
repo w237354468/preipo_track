@@ -222,7 +222,7 @@ def main_loop():
             logger.info(f"Price: {last_close:.2f} | Fast MA: {current_row['fast']:.2f} | Slow MA: {current_row['slow']:.2f} | Golden={golden_cross} | Death={death_cross}")
             
             # B. Get current position from OKX
-            pos_res = private_request("GET", "/api/v5/account/positions", params={"instId": inst_id})
+            pos_res = private_request("GET", "/api/v5/account/positions")
             pos_side = "flat"
             pos_sz = 0.0
             pos_avg_px = 0.0
@@ -258,17 +258,21 @@ def main_loop():
                             pos_upl_ratio = float(p.get("uplRatio", "0") or "0") * 100
                             pos_margin = float(p.get("margin", "0") or "0")
                             pos_liq_px = float(p.get("liqPx", "0") or "0")
+            else:
+                logger.error(f"Failed to fetch positions from OKX: {pos_res}")
                             
             logger.info(f"Position: side={pos_side} | size={pos_sz} | avgPx={pos_avg_px:.2f} | upl={pos_upl:.4f} | uplRatio={pos_upl_ratio:.2f}%")
             
             # C. Get available balance
             avail_balance = 0.0
-            bal_res = private_request("GET", "/api/v5/account/balance", params={"ccy": "USDT"})
+            bal_res = private_request("GET", "/api/v5/account/balance")
             if bal_res and bal_res.get("code") == "0" and bal_res.get("data"):
                 for detail in bal_res["data"][0].get("details", []):
                     if detail.get("ccy") == "USDT":
                         avail_balance = float(detail.get("availBal", "0"))
                         break
+            else:
+                logger.error(f"Failed to fetch balance from OKX: {bal_res}")
             
             # Cap at max_capital (10 USDT) total
             usable_margin = min(avail_balance, max_capital)
