@@ -277,8 +277,8 @@
                         </div>
                     </n-tab-pane>
 
-                    <!-- Tab 2: MA Crossover Bot Status -->
-                    <n-tab-pane name="ma_bot" tab="双均线交叉实盘">
+                    <!-- Tab 2: EMA+RSI Pullback Bot Status -->
+                    <n-tab-pane name="ma_bot" tab="EMA+RSI 趋势回调实盘">
                         <!-- Row 1: Status Cards -->
                         <n-grid :cols="5" :x-gap="16" style="margin-bottom: 20px; margin-top: 15px;">
                             <n-grid-item>
@@ -308,9 +308,9 @@
                             <n-grid-item>
                                 <n-card size="small" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 12px; height: 100%;">
                                     <div style="text-align: center; padding: 8px 0;">
-                                        <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 6px;">均线指标 (30m)</div>
-                                        <div style="color:var(--accent-blue); font-weight:600; font-size: 13px;">快 SMA15: {{ maBotStatus.fast_ma ? formatNumber(maBotStatus.fast_ma) : '--' }}</div>
-                                        <div style="color:var(--accent-purple); font-weight:600; font-size: 13px; margin-top: 2px;">慢 SMA20: {{ maBotStatus.slow_ma ? formatNumber(maBotStatus.slow_ma) : '--' }}</div>
+                                        <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 6px;">趋势/波动指标 (30m)</div>
+                                        <div style="color:var(--accent-blue); font-weight:600; font-size: 13px;">EMA(200): {{ maBotStatus.fast_ma ? formatNumber(maBotStatus.fast_ma) : '--' }}</div>
+                                        <div style="color:var(--accent-purple); font-weight:600; font-size: 13px; margin-top: 2px;">RSI(14): {{ maBotStatus.slow_ma ? formatNumber(maBotStatus.slow_ma) : '--' }}</div>
                                     </div>
                                 </n-card>
                             </n-grid-item>
@@ -329,8 +329,8 @@
                                 <n-card size="small" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 12px; height: 100%;">
                                     <div style="text-align: center; padding: 8px 0;">
                                         <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 6px;">最新信号</div>
-                                        <n-tag :type="maBotStatus.last_signal === 'golden_cross' ? 'success' : maBotStatus.last_signal === 'death_cross' ? 'error' : 'default'" size="medium" style="font-weight: 700;">
-                                            {{ maBotStatus.last_signal === 'golden_cross' ? '金叉 (做多)' : maBotStatus.last_signal === 'death_cross' ? '死叉 (做空)' : '无信号' }}
+                                        <n-tag :type="(maBotStatus.last_signal === 'golden_cross' || maBotStatus.last_signal === 'long_entry') ? 'success' : (maBotStatus.last_signal === 'death_cross' || maBotStatus.last_signal === 'short_entry') ? 'error' : 'default'" size="medium" style="font-weight: 700;">
+                                            {{ (maBotStatus.last_signal === 'golden_cross' || maBotStatus.last_signal === 'long_entry') ? '回调做多' : (maBotStatus.last_signal === 'death_cross' || maBotStatus.last_signal === 'short_entry') ? '回调做空' : maBotStatus.last_signal || '无信号' }}
                                         </n-tag>
                                     </div>
                                 </n-card>
@@ -338,7 +338,7 @@
                         </n-grid>
                         
                         <!-- Row 2: Current Position Card -->
-                        <n-card title="当前持仓 (MA Bot 独立仓位)" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 16px; margin-bottom: 20px;">
+                        <n-card title="当前持仓 (EMA+RSI 独立仓位)" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 16px; margin-bottom: 20px;">
                             <template #header-extra><i class="fa-solid fa-crosshairs" style="color: var(--accent-blue); font-size: 16px;"></i></template>
                             <div v-if="maBotStatus.position && maBotStatus.position.side !== 'flat'" style="display: flex; align-items: center; gap: 30px; padding: 10px 0;">
                                 <div>
@@ -367,10 +367,18 @@
                                         {{ maBotStatus.position.uplRatio >= 0 ? '+' : '' }}{{ maBotStatus.position.uplRatio.toFixed ? maBotStatus.position.uplRatio.toFixed(2) : maBotStatus.position.uplRatio }}%
                                     </div>
                                 </div>
+                                <div>
+                                    <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 4px;">止损价 (ATR)</div>
+                                    <div style="color: #f87171; font-size: 18px; font-weight: 700;">$ {{ maBotStatus.position.stop_loss ? formatNumber(maBotStatus.position.stop_loss) : '--' }}</div>
+                                </div>
+                                <div>
+                                    <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 4px;">止盈价 (ATR)</div>
+                                    <div style="color: var(--crypto-green); font-size: 18px; font-weight: 700;">$ {{ maBotStatus.position.take_profit ? formatNumber(maBotStatus.position.take_profit) : '--' }}</div>
+                                </div>
                             </div>
                             <div v-else style="text-align: center; color: var(--text-muted); padding: 20px 0; font-style: italic;">
                                 <i class="fa-solid fa-ghost" style="font-size: 24px; margin-bottom: 8px; display: block; opacity: 0.4;"></i>
-                                当前无持仓 (等待均线交叉信号)
+                                当前无持仓 (等待 EMA+RSI 回调信号)
                             </div>
                         </n-card>
                         

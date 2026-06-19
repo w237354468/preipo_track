@@ -831,13 +831,13 @@ async def get_ma_bot_status():
             with open(log_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()[-50:]
                 
-                # Find latest price/MA line
+                # Find latest price/EMA/RSI line
                 for line in reversed(lines):
-                    if "Price:" in line and "Fast MA:" in line:
+                    if "Price:" in line and "EMA(200):" in line:
                         last_log_line = line.strip()
                         price_match = re.search(r'Price:\s*([\d.]+)', line)
-                        fast_match = re.search(r'Fast MA:\s*([\d.]+)', line)
-                        slow_match = re.search(r'Slow MA:\s*([\d.]+)', line)
+                        fast_match = re.search(r'EMA\(200\):\s*([\d.]+)', line)
+                        slow_match = re.search(r'RSI\(14\):\s*([\d.]+)', line)
                         if price_match:
                             price = float(price_match.group(1))
                         if fast_match:
@@ -903,6 +903,8 @@ async def get_ma_bot_status():
             "avgPx": pos_avg_px,
             "upl": pos_upl,
             "uplRatio": pos_upl_ratio,
+            "stop_loss": state_data.get("stop_loss", 0.0),
+            "take_profit": state_data.get("take_profit", 0.0),
         },
         "balance": avail_balance,
         "last_signal": state_data.get("last_signal", "none"),

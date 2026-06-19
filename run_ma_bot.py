@@ -142,45 +142,63 @@ def fetch_candles(inst_id, bar='30m', limit=100):
     try:
         res = requests.get(url, timeout=10).json()
         if res.get("code") == "0" and res.get("data"):
-            df = pd.DataFrame(res["data"], columns=[
-                'ts', 'open', 'high', 'low', 'close', 'vol', 'volCcy', 'volCcyQuote', 'confirm'
-            ])
-            for col in ['open', 'high', 'low', 'close']:
-                df[col] = df[col].astype(float)
-            df['ts'] = df['ts'].astype(int)
-            df = df.iloc[::-1].reset_index(drop=True)
-            return df
-    except Exception as e:
-        logger.error(f"Failed to fetch market candles: {e}")
-    return None
+            df def calculate_ema(series, period):
+    return series.ewm(span=period, adjust=False).mean()
 
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.where(delta > 0, 0).ewm(alpha=1/period, adjust=False).mean()
+    loss = -delta.where(delta < 0, 0).ewm(alpha=1/period, adjust=False).mean()
+    rs = gain / loss
+    return 100 - (100 / (1 + rs))
+
+def calculate_atr(df, period=14):
+    high = df['high']
+    low = df['low']
+    close = df['close']
+    tr1 = high - low
+    tr2 = (high - close.shift(1)).abs()
+    tr3 = (low - close.shift(1)).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    return tr.ewm(alpha=1/period, adjust=False).mean()
 
 def main_loop():
     inst_id = "ANTHROPIC-USDT-SWAP"
-    max_capital = 10.0  # Total capital limit: 10 USDT (all-in each trade)
+    max_capital = 10.0  # Total capital limit: 10 USDT
     leverage = 3        # 3x leverage
     
-    # ── Risk Management Parameters ──
-    STOP_LOSS_PCT = -5.0       # Hard stop-loss: close if margin PnL% <= -5%
-    TAKE_PROFIT_PCT = 10.0     # Take-profit: close if margin PnL% >= +10%
-    TRAILING_STOP_PCT = 3.0    # Trailing stop: close if profit drops 3% from peak
+    # ── Strategy Parameters ──
+    EMA_PERIOD = 200
+    RSI_PERIOD = 14
+    ATR_PERIOD = 14
+    SL_ATR_MULT = 1.0
+    TP_ATR_MULT = 2.0
     
-    logger.info(f"Starting MA Crossover Bot for {inst_id} on environment: {ENV_TYPE}")
+    RSI_LONG_LOWER = 35.0
+    RSI_LONG_UPPER = 45.0
+    RSI_SHORT_LOWER = 55.0
+    RSI_SHORT_UPPER = 65.0
     
-    # Load persisted state
+    RSI_OB_EXIT = 75.0  # Overbought exit for long
+    RSI_OS_EXIT = 25.0  # Oversold exit for short
+    
+    logger.info(f"Starting EMA+RSI Pullback Bot (30m) for {inst_id} on environment: {ENV_TYPE}")
+    
     state = load_state()
-    logger.info(f"Loaded state: last_acted_ts={state['last_acted_ts']}, last_signal={state['last_signal']}, position_side={state['position_side']}")
+    # Initialize stop_loss/take_profit if not present
+    if "stop_loss" not in state:
+        state["stop_loss"] = 0.0
+    if "take_profit" not in state:
+        state["take_profit"] = 0.0
     
-    # 1. Check position mode
+    # Check position mode
     config_res = private_request("GET", "/api/v5/account/config")
     pos_mode = "net_mode"
     if config_res and config_res.get("code") == "0" and config_res.get("data"):
         pos_mode = config_res["data"][0].get("posMode", "long_short")
         logger.info(f"Current Position Mode on OKX: {pos_mode}")
-    else:
-        logger.warning(f"Failed to fetch account config, defaulting to net mode: {config_res}")
         
-    # 2. Set Leverage to 3x
+    # Set Leverage to 3x
     lev_res = private_request("POST", "/api/v5/account/set-leverage", json_data={
         "instId": inst_id,
         "lever": str(leverage),
@@ -190,38 +208,46 @@ def main_loop():
     
     while True:
         try:
-            # A. Fetch candles
-            df = fetch_candles(inst_id, bar='30m', limit=100)
-            if df is None or len(df) < 50:
+            # A. Fetch candles (at least 250 candles to compute EMA 200)
+            df = fetch_candles(inst_id, bar='30m', limit=250)
+            if df is None or len(df) < 220:
                 logger.warning("Not enough candles fetched, waiting...")
                 time.sleep(30)
                 continue
                 
-            # Compute SMA 15 and SMA 20
-            # Exclude the current active unconfirmed candle (last row) to avoid signal flickering
-            df_completed = df.iloc[:-1].copy()
-            df_completed['fast'] = df_completed['close'].rolling(window=15).mean()
-            df_completed['slow'] = df_completed['close'].rolling(window=20).mean()
+            # Compute indicators on all candles
+            df['ema'] = calculate_ema(df['close'], period=EMA_PERIOD)
+            df['rsi'] = calculate_rsi(df['close'], period=RSI_PERIOD)
+            df['atr'] = calculate_atr(df, period=ATR_PERIOD)
             
-            # Crossover check on last completed candle
-            current_row = df_completed.iloc[-1]
-            prev_row = df_completed.iloc[-2]
+            # Use last completed candle (index -2) for entry checks to avoid signal flickering
+            completed_candle = df.iloc[-2]
+            current_candle = df.iloc[-1]
             
-            if pd.isna(current_row['slow']) or pd.isna(prev_row['slow']):
-                logger.warning("Indicators not fully populated yet, waiting...")
-                time.sleep(30)
-                continue
-                
-            last_close = current_row['close']
-            current_candle_ts = int(current_row['ts'])
+            last_close = current_candle['close']
+            current_candle_ts = int(completed_candle['ts'])
             
-            # Crossover signals
-            golden_cross = (prev_row['fast'] <= prev_row['slow']) and (current_row['fast'] > current_row['slow'])
-            death_cross = (prev_row['fast'] >= prev_row['slow']) and (current_row['fast'] < current_row['slow'])
+            # Entry Signal Indicators (from completed candle)
+            comp_close = completed_candle['close']
+            comp_ema = completed_candle['ema']
+            comp_rsi = completed_candle['rsi']
+            comp_atr = completed_candle['atr']
             
-            logger.info(f"Price: {last_close:.2f} | Fast MA: {current_row['fast']:.2f} | Slow MA: {current_row['slow']:.2f} | Golden={golden_cross} | Death={death_cross}")
+            # Current values (for exit/monitoring)
+            curr_rsi = current_candle['rsi']
+            curr_ema = current_candle['ema']
             
-            # B. Get current position from OKX
+            # Check for entry signals
+            long_entry_signal = (comp_close > comp_ema) and (RSI_LONG_LOWER <= comp_rsi <= RSI_LONG_UPPER)
+            short_entry_signal = (comp_close < comp_ema) and (RSI_SHORT_LOWER <= comp_rsi <= RSI_SHORT_UPPER)
+            
+            logger.info(
+                f"Price: {last_close:.2f} | EMA(200): {curr_ema:.2f} | RSI(14): {curr_rsi:.2f} | "
+                f"Completed Candle (Close: {comp_close:.2f}, EMA: {comp_ema:.2f}, RSI: {comp_rsi:.2f}, ATR: {comp_atr:.4f}) | "
+                f"Signals: Long={long_entry_signal}, Short={short_entry_signal}"
+            )
+            
+            # B. Get current positions
             pos_res = private_request("GET", "/api/v5/account/positions")
             pos_side = "flat"
             pos_sz = 0.0
@@ -260,8 +286,11 @@ def main_loop():
                             pos_liq_px = float(p.get("liqPx", "0") or "0")
             else:
                 logger.error(f"Failed to fetch positions from OKX: {pos_res}")
-                            
-            logger.info(f"Position: side={pos_side} | size={pos_sz} | avgPx={pos_avg_px:.2f} | upl={pos_upl:.4f} | uplRatio={pos_upl_ratio:.2f}%")
+                
+            logger.info(
+                f"Position: side={pos_side} | size={pos_sz} | avgPx={pos_avg_px:.2f} | "
+                f"upl={pos_upl:.4f} | uplRatio={pos_upl_ratio:.2f}% | SL={state.get('stop_loss', 0.0):.2f} | TP={state.get('take_profit', 0.0):.2f}"
+            )
             
             # C. Get available balance
             avail_balance = 0.0
@@ -273,79 +302,80 @@ def main_loop():
                         break
             else:
                 logger.error(f"Failed to fetch balance from OKX: {bal_res}")
-            
-            # Cap at max_capital (10 USDT) total
+                
             usable_margin = min(avail_balance, max_capital)
             target_value = usable_margin * leverage
             target_sz = round(target_value / last_close, 3)
             if target_sz < 0.001:
                 target_sz = 0.001
                 
-            logger.info(f"Balance: available={avail_balance:.2f} USDT | usable(cap {max_capital})={usable_margin:.2f} | target_sz={target_sz}")
+            # D. Exit / Risk Check
+            exit_triggered = False
+            exit_reason = ""
             
-            # ── RISK MANAGEMENT: Stop-Loss / Take-Profit / Trailing Stop ──
-            risk_exit = False
             if pos_side != "flat" and pos_sz > 0:
-                # Update peak PnL tracking for trailing stop
-                current_peak = state.get("peak_upl_ratio", 0.0)
-                if pos_upl_ratio > current_peak:
-                    state["peak_upl_ratio"] = pos_upl_ratio
-                    save_state(state)
-                    current_peak = pos_upl_ratio
-                
-                # Check stop-loss
-                if pos_upl_ratio <= STOP_LOSS_PCT:
-                    logger.info(f"🛑 STOP-LOSS triggered! PnL%={pos_upl_ratio:.2f}% <= {STOP_LOSS_PCT}%")
-                    risk_exit = True
-                    exit_reason = "STOP_LOSS"
-                # Check take-profit
-                elif pos_upl_ratio >= TAKE_PROFIT_PCT:
-                    logger.info(f"🎯 TAKE-PROFIT triggered! PnL%={pos_upl_ratio:.2f}% >= {TAKE_PROFIT_PCT}%")
-                    risk_exit = True
-                    exit_reason = "TAKE_PROFIT"
-                # Check trailing stop (only if we've been in profit)
-                elif current_peak >= 2.0 and (current_peak - pos_upl_ratio) >= TRAILING_STOP_PCT:
-                    logger.info(f"📉 TRAILING STOP triggered! Peak={current_peak:.2f}% -> Current={pos_upl_ratio:.2f}% (drawdown={current_peak - pos_upl_ratio:.2f}%)")
-                    risk_exit = True
-                    exit_reason = "TRAILING_STOP"
-                else:
-                    logger.info(f"Risk check OK: PnL%={pos_upl_ratio:.2f}% | Peak={current_peak:.2f}% | SL={STOP_LOSS_PCT}% | TP={TAKE_PROFIT_PCT}%")
-                
-                if risk_exit:
-                    # Close current position
+                if pos_side == "long":
+                    if last_close <= state.get("stop_loss", 0.0):
+                        exit_triggered = True
+                        exit_reason = "STOP_LOSS_ATR"
+                    elif last_close >= state.get("take_profit", 0.0):
+                        exit_triggered = True
+                        exit_reason = "TAKE_PROFIT_ATR"
+                    elif last_close < curr_ema:
+                        exit_triggered = True
+                        exit_reason = "EMA_CROSS_EXIT"
+                    elif curr_rsi >= RSI_OB_EXIT:
+                        exit_triggered = True
+                        exit_reason = "RSI_OVERBOUGHT_EXIT"
+                elif pos_side == "short":
+                    if last_close >= state.get("stop_loss", float('inf')) or (state.get("stop_loss", 0.0) == 0.0):
+                        # Guard condition: if stop_loss is 0.0 (e.g. state reset or missing), don't trigger stop loss instantly unless we're above infinity
+                        # or if we are actual short but SL is uninitialized.
+                        if state.get("stop_loss", 0.0) > 0.0 and last_close >= state.get("stop_loss", 0.0):
+                            exit_triggered = True
+                            exit_reason = "STOP_LOSS_ATR"
+                    elif state.get("take_profit", 0.0) > 0.0 and last_close <= state.get("take_profit", 0.0):
+                        exit_triggered = True
+                        exit_reason = "TAKE_PROFIT_ATR"
+                    elif last_close > curr_ema:
+                        exit_triggered = True
+                        exit_reason = "EMA_CROSS_EXIT"
+                    elif curr_rsi <= RSI_OS_EXIT:
+                        exit_triggered = True
+                        exit_reason = "RSI_OVERSOLD_EXIT"
+                        
+                if exit_triggered:
+                    logger.info(f"⚡ EXIT TRIGGERED: {exit_reason} (Close: {last_close:.2f})")
                     close_side = "sell" if pos_side == "long" else "buy"
-                    close_pos_side_val = pos_side if pos_mode == "long_short" else "net"
+                    close_pos_side = pos_side if pos_mode == "long_short" else "net"
                     order_data = {
                         "instId": inst_id, "tdMode": "cross",
-                        "side": close_side, "posSide": close_pos_side_val,
+                        "side": close_side, "posSide": close_pos_side,
                         "ordType": "market", "sz": str(pos_sz)
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
-                    action_name = f"{exit_reason}_CLOSE_{'LONG' if pos_side == 'long' else 'SHORT'}"
-                    logger.info(f"⚡ {exit_reason} close response: {res}")
+                    logger.info(f"Close response: {res}")
                     record_trade({
                         "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "action": action_name, "size": pos_sz,
-                        "price": last_close, "pnl_pct": pos_upl_ratio,
-                        "reason": exit_reason, "response": str(res)
+                        "action": f"CLOSE_{pos_side.upper()}",
+                        "size": pos_sz, "price": last_close, "reason": exit_reason, "response": str(res)
                     })
-                    # Reset state
+                    
                     state["position_side"] = "flat"
-                    state["peak_upl_ratio"] = 0.0
+                    state["stop_loss"] = 0.0
+                    state["take_profit"] = 0.0
                     state["last_signal"] = exit_reason.lower()
                     save_state(state)
-                    logger.info(f"Position closed by {exit_reason}. Waiting for next crossover signal.")
-                    time.sleep(60)  # Wait before looking for new signals
+                    time.sleep(60)
                     continue
-            
-            # ── DUPLICATE ORDER PREVENTION ──
+                    
+            # E. Entry execution
             already_acted = (current_candle_ts == state.get("last_acted_ts", 0))
             
-            # D. Trade execution logic (MA crossover signals)
-            if golden_cross and not already_acted:
-                logger.info("⚡ Golden Cross triggered!")
+            if long_entry_signal and not already_acted:
+                logger.info("⚡ Long Entry Signal triggered!")
                 if pos_side == "short":
-                    logger.info(f"Closing existing Short position (size={pos_sz})...")
+                    logger.info(f"Closing short (size={pos_sz})...")
                     close_pos_side = "short" if pos_mode == "long_short" else "net"
                     order_data = {
                         "instId": inst_id, "tdMode": "cross",
@@ -356,13 +386,12 @@ def main_loop():
                     logger.info(f"Close Short response: {res}")
                     record_trade({
                         "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "action": "CLOSE_SHORT", "size": pos_sz,
-                        "price": last_close, "response": str(res)
+                        "action": "CLOSE_SHORT", "size": pos_sz, "price": last_close, "response": str(res)
                     })
                     time.sleep(2)
                     
                 if pos_side != "long":
-                    logger.info(f"Opening Long position with size {target_sz}...")
+                    logger.info(f"Opening Long (size={target_sz})...")
                     open_pos_side = "long" if pos_mode == "long_short" else "net"
                     order_data = {
                         "instId": inst_id, "tdMode": "cross",
@@ -370,25 +399,28 @@ def main_loop():
                         "ordType": "market", "sz": str(target_sz)
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
-                    logger.info(f"⚡ Open Long response: {res}")
+                    logger.info(f"Open Long response: {res}")
+                    
+                    sl = last_close - SL_ATR_MULT * comp_atr
+                    tp = last_close + TP_ATR_MULT * comp_atr
+                    
+                    state["last_acted_ts"] = current_candle_ts
+                    state["last_signal"] = "long_entry"
+                    state["position_side"] = "long"
+                    state["stop_loss"] = round(sl, 2)
+                    state["take_profit"] = round(tp, 2)
+                    save_state(state)
+                    
                     record_trade({
                         "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "action": "OPEN_LONG", "size": target_sz,
-                        "price": last_close, "response": str(res)
+                        "action": "OPEN_LONG", "size": target_sz, "price": last_close,
+                        "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
                     })
                     
-                # Update state to mark this candle as acted
-                state["last_acted_ts"] = current_candle_ts
-                state["last_signal"] = "golden_cross"
-                state["position_side"] = "long"
-                state["peak_upl_ratio"] = 0.0
-                save_state(state)
-                logger.info(f"State saved: acted on candle ts={current_candle_ts}")
-            
-            elif death_cross and not already_acted:
-                logger.info("⚡ Death Cross triggered!")
+            elif short_entry_signal and not already_acted:
+                logger.info("⚡ Short Entry Signal triggered!")
                 if pos_side == "long":
-                    logger.info(f"Closing existing Long position (size={pos_sz})...")
+                    logger.info(f"Closing long (size={pos_sz})...")
                     close_pos_side = "long" if pos_mode == "long_short" else "net"
                     order_data = {
                         "instId": inst_id, "tdMode": "cross",
@@ -399,13 +431,12 @@ def main_loop():
                     logger.info(f"Close Long response: {res}")
                     record_trade({
                         "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "action": "CLOSE_LONG", "size": pos_sz,
-                        "price": last_close, "response": str(res)
+                        "action": "CLOSE_LONG", "size": pos_sz, "price": last_close, "response": str(res)
                     })
                     time.sleep(2)
                     
                 if pos_side != "short":
-                    logger.info(f"Opening Short position with size {target_sz}...")
+                    logger.info(f"Opening Short (size={target_sz})...")
                     open_pos_side = "short" if pos_mode == "long_short" else "net"
                     order_data = {
                         "instId": inst_id, "tdMode": "cross",
@@ -413,22 +444,39 @@ def main_loop():
                         "ordType": "market", "sz": str(target_sz)
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
-                    logger.info(f"⚡ Open Short response: {res}")
+                    logger.info(f"Open Short response: {res}")
+                    
+                    sl = last_close + SL_ATR_MULT * comp_atr
+                    tp = last_close - TP_ATR_MULT * comp_atr
+                    
+                    state["last_acted_ts"] = current_candle_ts
+                    state["last_signal"] = "short_entry"
+                    state["position_side"] = "short"
+                    state["stop_loss"] = round(sl, 2)
+                    state["take_profit"] = round(tp, 2)
+                    save_state(state)
+                    
                     record_trade({
                         "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "action": "OPEN_SHORT", "size": target_sz,
-                        "price": last_close, "response": str(res)
+                        "action": "OPEN_SHORT", "size": target_sz, "price": last_close,
+                        "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
                     })
-                    
-                state["last_acted_ts"] = current_candle_ts
-                state["last_signal"] = "death_cross"
-                state["position_side"] = "short"
-                state["peak_upl_ratio"] = 0.0
-                save_state(state)
-                logger.info(f"State saved: acted on candle ts={current_candle_ts}")
             
-            elif (golden_cross or death_cross) and already_acted:
-                logger.info(f"⚠️ Crossover signal on candle ts={current_candle_ts} but ALREADY ACTED - skipping (restart-safe)")
+            elif (long_entry_signal or short_entry_signal) and already_acted:
+                logger.info(f"⚠️ Entry signal on candle ts={current_candle_ts} but ALREADY ACTED - skipping")
+            else:
+                logger.info("No signal detected. Keeping current state.")
+                
+        except Exception as ex:
+            logger.error(f"Error in main loop: {ex}", exc_info=True)
+            
+        time.sleep(60)
+
+if __name__ == "__main__":
+    try:
+        main_loop()
+    except KeyboardInterrupt:
+        logger.info("Bot stopped by user.")� Crossover signal on candle ts={current_candle_ts} but ALREADY ACTED - skipping (restart-safe)")
             else:
                 logger.info("No crossover detected. Keeping current state.")
                 
