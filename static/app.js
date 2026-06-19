@@ -468,7 +468,43 @@ const DashboardApp = {
             ctx.fill();
         }
         
+        function getPositionProgress(pos) {
+            if (!pos || pos.side === 'flat' || !pos.stop_loss || !pos.take_profit) return 50;
+            const current = maBotStatus.value.price;
+            if (!current) return 50;
+            const sl = pos.stop_loss;
+            const tp = pos.take_profit;
+            if (pos.side === 'long') {
+                if (tp === sl) return 50;
+                const pct = ((current - sl) / (tp - sl)) * 100;
+                return Math.min(Math.max(pct, 0), 100);
+            } else {
+                if (sl === tp) return 50;
+                const pct = ((sl - current) / (sl - tp)) * 100;
+                return Math.min(Math.max(pct, 0), 100);
+            }
+        }
+        
+        function getPositionEntryProgress(pos) {
+            if (!pos || pos.side === 'flat' || !pos.stop_loss || !pos.take_profit) return 50;
+            const entry = pos.avgPx;
+            if (!entry) return 50;
+            const sl = pos.stop_loss;
+            const tp = pos.take_profit;
+            if (pos.side === 'long') {
+                if (tp === sl) return 50;
+                const pct = ((entry - sl) / (tp - sl)) * 100;
+                return Math.min(Math.max(pct, 0), 100);
+            } else {
+                if (sl === tp) return 50;
+                const pct = ((sl - entry) / (sl - tp)) * 100;
+                return Math.min(Math.max(pct, 0), 100);
+            }
+        }
+        
         return {
+            getPositionProgress,
+            getPositionEntryProgress,
             showDashboard,
             connecting,
             rememberKeys,

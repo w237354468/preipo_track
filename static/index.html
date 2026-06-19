@@ -24,46 +24,46 @@
         <div class="main-content">
             
             <!-- Setup Section (Credentials Form) -->
-            <n-card v-if="!showDashboard" class="login-card" style="margin: 80px auto; max-width: 500px; background: rgba(22, 28, 45, 0.45); border: 1px solid var(--panel-border); border-radius: 16px;">
-                <div class="login-header" style="text-align: center; margin-bottom: 24px;">
-                    <i class="fa-solid fa-shield-halved login-logo" style="font-size: 44px; color: var(--accent-blue);"></i>
-                    <h2 style="color: #ffffff; font-size: 22px; margin-top: 10px; font-weight: 700;">OKX 实时监控配置</h2>
-                    <p style="color: var(--text-secondary); font-size: 13px;">请输入您的 OKX 账号 API 密钥以查看实时账户余额与合约持仓</p>
+            <n-card v-if="!showDashboard" class="login-card">
+                <div class="login-header">
+                    <i class="fa-solid fa-shield-halved login-logo"></i>
+                    <h2>OKX 实时监控配置</h2>
+                    <p>请输入您的 OKX 账号 API 密钥以查看实时账户余额与合约持仓</p>
                 </div>
                 
                 <n-form @submit.prevent="handleConnectForm" label-placement="top">
                     <n-form-item label="API Key">
-                        <template #label><span style="color: var(--text-secondary);"><i class="fa-solid fa-key" style="margin-right: 6px; color: var(--accent-blue);"></i>API Key</span></template>
+                        <template #label><span class="label-text"><i class="fa-solid fa-key"></i>API Key</span></template>
                         <n-input v-model:value="credentialsForm.api_key" placeholder="输入您的 OK-ACCESS-KEY" required />
                     </n-form-item>
                     
                     <n-form-item label="Secret Key">
-                        <template #label><span style="color: var(--text-secondary);"><i class="fa-solid fa-lock" style="margin-right: 6px; color: var(--accent-blue);"></i>Secret Key</span></template>
+                        <template #label><span class="label-text"><i class="fa-solid fa-lock"></i>Secret Key</span></template>
                         <n-input type="password" show-password-on="mousedown" v-model:value="credentialsForm.secret_key" placeholder="输入您的 OK-ACCESS-SIGN 秘钥" required />
                     </n-form-item>
                     
                     <n-form-item label="Passphrase (API 密码)">
-                        <template #label><span style="color: var(--text-secondary);"><i class="fa-solid fa-key" style="margin-right: 6px; color: var(--accent-blue);"></i>Passphrase (API 密码)</span></template>
+                        <template #label><span class="label-text"><i class="fa-solid fa-key"></i>Passphrase (API 密码)</span></template>
                         <n-input type="password" show-password-on="mousedown" v-model:value="credentialsForm.passphrase" placeholder="输入创建 API 时的密码" required />
                     </n-form-item>
                     
                     <n-grid :cols="2" :x-gap="12">
                         <n-form-item-gi label="交易环境">
-                            <template #label><span style="color: var(--text-secondary);"><i class="fa-solid fa-circle-nodes" style="margin-right: 6px; color: var(--accent-blue);"></i>交易环境</span></template>
+                            <template #label><span class="label-text"><i class="fa-solid fa-circle-nodes"></i>交易环境</span></template>
                             <n-select v-model:value="credentialsForm.environment" :options="envOptions" />
                         </n-form-item-gi>
                         
-                        <n-form-item-gi class="remember-me-group" style="display: flex; align-items: center; padding-top: 24px;">
+                        <n-form-item-gi class="remember-me-group">
                             <n-checkbox v-model:checked="rememberKeys">本地保存密钥 (安全加密)</n-checkbox>
                         </n-form-item-gi>
                     </n-grid>
                     
-                    <n-button type="primary" attr-type="submit" :loading="connecting" block size="large" style="margin-top: 24px; background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border: none; font-weight: 600;">
+                    <n-button type="primary" attr-type="submit" :loading="connecting" block size="large" class="connect-button">
                         {{ connecting ? '正在建立 WebSocket 连接...' : '立即连接并开始监控' }}
                     </n-button>
                 </n-form>
                 
-                <n-alert type="warning" show-icon style="margin-top: 24px; background: rgba(234, 179, 8, 0.05); border-color: rgba(234, 179, 8, 0.2);">
+                <n-alert type="warning" show-icon class="security-alert">
                     <strong>安全说明</strong>：您的密钥将仅保存在您本地浏览器的 LocalStorage 中，每次查询均以加密流形式传输给本地后端，不会保存在任何云端服务器中。
                 </n-alert>
             </n-card>
@@ -110,23 +110,44 @@
                         <!-- Stats Summary Row -->
                         <n-grid :cols="3" :x-gap="20" style="margin-bottom: 30px; margin-top: 15px;">
                             <n-grid-item>
-                                <n-card class="stat-card" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 14px;">
-                                    <span class="stat-label">交易账户总资产估值</span>
-                                    <h2 id="total-equity" class="stat-value" style="font-size: 26px; font-weight: 700; background: linear-gradient(to right, #ffffff, #c2d6ff); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">$ {{ formatUSD(totalEquityUsd) }}</h2>
+                                <n-card class="stat-card">
+                                    <div class="stat-card-inner">
+                                        <div class="stat-info">
+                                            <span class="stat-label"><i class="fa-solid fa-circle-dot stat-dot blue"></i>交易账户总资产估值</span>
+                                            <h2 id="total-equity" class="stat-value">$ {{ formatUSD(totalEquityUsd) }}</h2>
+                                        </div>
+                                        <div class="stat-icon-wrapper blue">
+                                            <i class="fa-solid fa-wallet"></i>
+                                        </div>
+                                    </div>
                                 </n-card>
                             </n-grid-item>
                             <n-grid-item>
-                                <n-card class="stat-card" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 14px;">
-                                    <span class="stat-label">运行环境</span>
-                                    <h2 id="env-badge" class="stat-value" :style="{ color: isSimulated ? 'var(--warning-yellow)' : 'var(--crypto-green)', fontSize: '26px', fontWeight: '700' }">
-                                        {{ isSimulated ? '模拟盘 (DEMO)' : '实盘交易 (LIVE)' }}
-                                    </h2>
+                                <n-card class="stat-card">
+                                    <div class="stat-card-inner">
+                                        <div class="stat-info">
+                                            <span class="stat-label"><i class="fa-solid fa-circle-dot stat-dot" :class="isSimulated ? 'yellow' : 'green'"></i>运行环境</span>
+                                            <h2 id="env-badge" class="stat-value" :class="isSimulated ? 'yellow-text' : 'green-text'">
+                                                {{ isSimulated ? '模拟盘 (DEMO)' : '实盘交易 (LIVE)' }}
+                                            </h2>
+                                        </div>
+                                        <div class="stat-icon-wrapper" :class="isSimulated ? 'yellow' : 'green'">
+                                            <i class="fa-solid fa-server"></i>
+                                        </div>
+                                    </div>
                                 </n-card>
                             </n-grid-item>
                             <n-grid-item>
-                                <n-card class="stat-card" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 14px;">
-                                    <span class="stat-label">持仓仓位数量</span>
-                                    <h2 id="positions-count" class="stat-value" style="font-size: 26px; font-weight: 700; color: #ffffff;">{{ positions.length }} 个仓位</h2>
+                                <n-card class="stat-card">
+                                    <div class="stat-card-inner">
+                                        <div class="stat-info">
+                                            <span class="stat-label"><i class="fa-solid fa-circle-dot stat-dot purple"></i>持仓仓位数量</span>
+                                            <h2 id="positions-count" class="stat-value">{{ positions.length }} <span class="stat-unit">个仓位</span></h2>
+                                        </div>
+                                        <div class="stat-icon-wrapper purple">
+                                            <i class="fa-solid fa-layer-group"></i>
+                                        </div>
+                                    </div>
                                 </n-card>
                             </n-grid-item>
                         </n-grid>
@@ -282,108 +303,166 @@
                         <!-- Row 1: Status Cards -->
                         <n-grid :cols="5" :x-gap="16" style="margin-bottom: 20px; margin-top: 15px;">
                             <n-grid-item>
-                                <n-card size="small" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 12px; height: 100%;">
-                                    <div style="text-align: center; padding: 8px 0;">
-                                        <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 6px;">运行状态</div>
-                                        <n-tag :type="maBotStatus.is_running ? 'success' : 'error'" size="medium" style="font-weight: 700;">
-                                            {{ maBotStatus.is_running ? '运行中' : '已停止' }}
-                                        </n-tag>
-                                        <div style="margin-top: 6px; color: var(--text-secondary); font-size: 10px;">
-                                            {{ maBotStatus.last_time || '--' }}
+                                <n-card size="small" class="stat-card" style="height: 100%;">
+                                    <div class="stat-card-inner" style="padding: 16px;">
+                                        <div class="stat-info">
+                                            <span class="stat-label">运行状态</span>
+                                            <n-tag :type="maBotStatus.is_running ? 'success' : 'error'" size="medium" style="font-weight: 700; margin-top: 4px;">
+                                                {{ maBotStatus.is_running ? '运行中' : '已停止' }}
+                                            </n-tag>
+                                            <span style="margin-top: 4px; color: var(--text-muted); font-size: 9px; font-family: monospace;">
+                                                {{ maBotStatus.last_time ? maBotStatus.last_time.split(' ')[1] : '--' }}
+                                            </span>
+                                        </div>
+                                        <div class="stat-icon-wrapper" :class="maBotStatus.is_running ? 'green' : 'red'" style="width: 36px; height: 36px; font-size: 14px; border-radius: 8px;">
+                                            <i class="fa-solid" :class="maBotStatus.is_running ? 'fa-play' : 'fa-stop'"></i>
                                         </div>
                                     </div>
                                 </n-card>
                             </n-grid-item>
                             
                             <n-grid-item>
-                                <n-card size="small" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 12px; height: 100%;">
-                                    <div style="text-align: center; padding: 8px 0;">
-                                        <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 6px;">当前价格</div>
-                                        <h2 style="color:#ffffff; font-size:20px; font-weight:700; margin:0;">$ {{ maBotStatus.price ? formatNumber(maBotStatus.price) : '--' }}</h2>
-                                        <div style="color: var(--text-secondary); font-size: 10px; margin-top: 4px;">ANTHROPIC-USDT-SWAP</div>
+                                <n-card size="small" class="stat-card" style="height: 100%;">
+                                    <div class="stat-card-inner" style="padding: 16px;">
+                                        <div class="stat-info">
+                                            <span class="stat-label">最新价格</span>
+                                            <h3 class="crypto-numeric" style="color:#ffffff; font-size:16px; font-weight:700; margin-top: 4px;">$ {{ maBotStatus.price ? formatNumber(maBotStatus.price) : '--' }}</h3>
+                                            <span style="color: var(--text-muted); font-size: 9px; margin-top: 2px;">AP-USDT-SWAP</span>
+                                        </div>
+                                        <div class="stat-icon-wrapper blue" style="width: 36px; height: 36px; font-size: 14px; border-radius: 8px;">
+                                            <i class="fa-solid fa-dollar-sign"></i>
+                                        </div>
                                     </div>
                                 </n-card>
                             </n-grid-item>
                             
                             <n-grid-item>
-                                <n-card size="small" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 12px; height: 100%;">
-                                    <div style="text-align: center; padding: 8px 0;">
-                                        <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 6px;">趋势/波动指标 (30m)</div>
-                                        <div style="color:var(--accent-blue); font-weight:600; font-size: 13px;">EMA(200): {{ maBotStatus.fast_ma ? formatNumber(maBotStatus.fast_ma) : '--' }}</div>
-                                        <div style="color:var(--accent-purple); font-weight:600; font-size: 13px; margin-top: 2px;">RSI(14): {{ maBotStatus.slow_ma ? formatNumber(maBotStatus.slow_ma) : '--' }}</div>
+                                <n-card size="small" class="stat-card" style="height: 100%;">
+                                    <div class="stat-card-inner" style="padding: 16px;">
+                                        <div class="stat-info">
+                                            <span class="stat-label">指标 (30m)</span>
+                                            <div style="font-size: 10px; font-weight:600; margin-top: 4px; color: var(--accent-blue);">
+                                                EMA: {{ maBotStatus.fast_ma ? formatNumber(maBotStatus.fast_ma) : '--' }}
+                                            </div>
+                                            <div style="font-size: 10px; font-weight:600; margin-top: 2px; color: var(--accent-purple);">
+                                                RSI: {{ maBotStatus.slow_ma ? formatNumber(maBotStatus.slow_ma) : '--' }}
+                                            </div>
+                                        </div>
+                                        <div class="stat-icon-wrapper purple" style="width: 36px; height: 36px; font-size: 14px; border-radius: 8px;">
+                                            <i class="fa-solid fa-chart-simple"></i>
+                                        </div>
                                     </div>
                                 </n-card>
                             </n-grid-item>
                             
                             <n-grid-item>
-                                <n-card size="small" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 12px; height: 100%;">
-                                    <div style="text-align: center; padding: 8px 0;">
-                                        <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 6px;">可用余额</div>
-                                        <h2 style="color:#ffffff; font-size:20px; font-weight:700; margin:0;">{{ maBotStatus.balance ? formatUSD(maBotStatus.balance) : '0.00' }}</h2>
-                                        <div style="color: var(--warning-yellow); font-size: 10px; margin-top: 4px;">上限 10 USDT · 3x杠杆</div>
+                                <n-card size="small" class="stat-card" style="height: 100%;">
+                                    <div class="stat-card-inner" style="padding: 16px;">
+                                        <div class="stat-info">
+                                            <span class="stat-label">账户余额</span>
+                                            <h3 class="crypto-numeric" style="color:#ffffff; font-size:16px; font-weight:700; margin-top: 4px;">$ {{ maBotStatus.balance ? formatUSD(maBotStatus.balance) : '0.00' }}</h3>
+                                            <span style="color: var(--warning-yellow); font-size: 9px; margin-top: 2px;">3x · 10 USDT</span>
+                                        </div>
+                                        <div class="stat-icon-wrapper yellow" style="width: 36px; height: 36px; font-size: 14px; border-radius: 8px;">
+                                            <i class="fa-solid fa-scale-balanced"></i>
+                                        </div>
                                     </div>
                                 </n-card>
                             </n-grid-item>
                             
                             <n-grid-item>
-                                <n-card size="small" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 12px; height: 100%;">
-                                    <div style="text-align: center; padding: 8px 0;">
-                                        <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 6px;">最新信号</div>
-                                        <n-tag :type="(maBotStatus.last_signal === 'golden_cross' || maBotStatus.last_signal === 'long_entry') ? 'success' : (maBotStatus.last_signal === 'death_cross' || maBotStatus.last_signal === 'short_entry') ? 'error' : 'default'" size="medium" style="font-weight: 700;">
-                                            {{ (maBotStatus.last_signal === 'golden_cross' || maBotStatus.last_signal === 'long_entry') ? '回调做多' : (maBotStatus.last_signal === 'death_cross' || maBotStatus.last_signal === 'short_entry') ? '回调做空' : maBotStatus.last_signal || '无信号' }}
-                                        </n-tag>
+                                <n-card size="small" class="stat-card" style="height: 100%;">
+                                    <div class="stat-card-inner" style="padding: 16px;">
+                                        <div class="stat-info">
+                                            <span class="stat-label">最新信号</span>
+                                            <n-tag :type="(maBotStatus.last_signal === 'golden_cross' || maBotStatus.last_signal === 'long_entry') ? 'success' : (maBotStatus.last_signal === 'death_cross' || maBotStatus.last_signal === 'short_entry') ? 'error' : 'default'" size="medium" style="font-weight: 700; margin-top: 4px;">
+                                                {{ (maBotStatus.last_signal === 'golden_cross' || maBotStatus.last_signal === 'long_entry') ? '做多 LONG' : (maBotStatus.last_signal === 'death_cross' || maBotStatus.last_signal === 'short_entry') ? '做空 SHORT' : maBotStatus.last_signal || '无信号' }}
+                                            </n-tag>
+                                        </div>
+                                        <div class="stat-icon-wrapper blue" style="width: 36px; height: 36px; font-size: 14px; border-radius: 8px;">
+                                            <i class="fa-solid fa-wave-square"></i>
+                                        </div>
                                     </div>
                                 </n-card>
                             </n-grid-item>
                         </n-grid>
                         
                         <!-- Row 2: Current Position Card -->
-                        <n-card title="当前持仓 (EMA+RSI 独立仓位)" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 16px; margin-bottom: 20px;">
+                        <n-card title="当前持仓 (EMA+RSI 独立仓位)" style="margin-bottom: 20px;">
                             <template #header-extra><i class="fa-solid fa-crosshairs" style="color: var(--accent-blue); font-size: 16px;"></i></template>
-                            <div v-if="maBotStatus.position && maBotStatus.position.side !== 'flat'" style="display: flex; align-items: center; gap: 30px; padding: 10px 0;">
-                                <div>
-                                    <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 4px;">方向</div>
-                                    <n-tag :type="maBotStatus.position.side === 'long' ? 'success' : 'error'" size="large" style="font-weight: 700; font-size: 14px;">
-                                        {{ maBotStatus.position.side === 'long' ? '多单 LONG ↑' : '空单 SHORT ↓' }}
+                            <div v-if="maBotStatus.position && maBotStatus.position.side !== 'flat'" class="cockpit-container">
+                                <!-- Direction visual -->
+                                <div class="cockpit-direction-card" :class="maBotStatus.position.side">
+                                    <div class="cockpit-direction-icon">
+                                        <i class="fa-solid" :class="maBotStatus.position.side === 'long' ? 'fa-circle-arrow-up' : 'fa-circle-arrow-down'"></i>
+                                    </div>
+                                    <n-tag :type="maBotStatus.position.side === 'long' ? 'success' : 'error'" size="large" style="font-weight: 700;">
+                                        {{ maBotStatus.position.side === 'long' ? '做多 LONG' : '做空 SHORT' }}
                                     </n-tag>
-                                </div>
-                                <div>
-                                    <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 4px;">持仓量</div>
-                                    <div style="color: #fff; font-size: 18px; font-weight: 700;">{{ maBotStatus.position.size }}</div>
-                                </div>
-                                <div>
-                                    <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 4px;">开仓均价</div>
-                                    <div style="color: #fff; font-size: 18px; font-weight: 700;">$ {{ formatNumber(maBotStatus.position.avgPx) }}</div>
-                                </div>
-                                <div>
-                                    <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 4px;">未实现盈亏</div>
-                                    <div :style="{ color: maBotStatus.position.upl >= 0 ? 'var(--crypto-green)' : '#f87171', fontSize: '18px', fontWeight: '700' }">
-                                        {{ maBotStatus.position.upl >= 0 ? '+' : '' }}{{ formatUSD(maBotStatus.position.upl) }} USDT
+                                    <div style="color: var(--text-secondary); font-size: 10px; margin-top: 6px; font-family: monospace;">
+                                        杠杆: 3x | 数量: {{ maBotStatus.position.size }}
                                     </div>
                                 </div>
-                                <div>
-                                    <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 4px;">收益率</div>
-                                    <div :style="{ color: maBotStatus.position.uplRatio >= 0 ? 'var(--crypto-green)' : '#f87171', fontSize: '18px', fontWeight: '700' }">
-                                        {{ maBotStatus.position.uplRatio >= 0 ? '+' : '' }}{{ maBotStatus.position.uplRatio.toFixed ? maBotStatus.position.uplRatio.toFixed(2) : maBotStatus.position.uplRatio }}%
+
+                                <!-- Financial Metrics -->
+                                <div class="cockpit-metrics">
+                                    <div class="metric-box">
+                                        <span class="metric-label">开仓价格</span>
+                                        <span class="metric-val crypto-numeric">$ {{ formatNumber(maBotStatus.position.avgPx) }}</span>
+                                    </div>
+                                    <div class="metric-box">
+                                        <span class="metric-label">当前价格</span>
+                                        <span class="metric-val crypto-numeric" style="color: var(--accent-blue);">$ {{ maBotStatus.price ? formatNumber(maBotStatus.price) : '--' }}</span>
+                                    </div>
+                                    <div class="metric-box">
+                                        <span class="metric-label">未实现盈亏</span>
+                                        <span class="metric-val pnl-text crypto-numeric" :style="{ color: maBotStatus.position.upl >= 0 ? 'var(--crypto-green)' : 'var(--crypto-red)' }">
+                                            {{ maBotStatus.position.upl >= 0 ? '+' : '' }}{{ formatUSD(maBotStatus.position.upl) }} <span style="font-size: 11px;">USDT</span>
+                                        </span>
+                                    </div>
+                                    <div class="metric-box">
+                                        <span class="metric-label">收益率</span>
+                                        <span class="metric-val pnl-text crypto-numeric" :style="{ color: maBotStatus.position.uplRatio >= 0 ? 'var(--crypto-green)' : 'var(--crypto-red)' }">
+                                            {{ maBotStatus.position.uplRatio >= 0 ? '+' : '' }}{{ maBotStatus.position.uplRatio.toFixed ? maBotStatus.position.uplRatio.toFixed(2) : maBotStatus.position.uplRatio }}%
+                                        </span>
                                     </div>
                                 </div>
-                                <div>
-                                    <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 4px;">止损价 (ATR)</div>
-                                    <div style="color: #f87171; font-size: 18px; font-weight: 700;">$ {{ maBotStatus.position.stop_loss ? formatNumber(maBotStatus.position.stop_loss) : '--' }}</div>
-                                </div>
-                                <div>
-                                    <div style="color: var(--text-secondary); font-size: 11px; margin-bottom: 4px;">止盈价 (ATR)</div>
-                                    <div style="color: var(--crypto-green); font-size: 18px; font-weight: 700;">$ {{ maBotStatus.position.take_profit ? formatNumber(maBotStatus.position.take_profit) : '--' }}</div>
+
+                                <!-- Visual Risk / Profit and Loss Slider -->
+                                <div class="risk-bar-card">
+                                    <div style="font-size: 11px; font-weight:600; color: var(--text-secondary); display:flex; align-items:center; gap:6px;">
+                                        <i class="fa-solid fa-shield-halved" style="color:var(--accent-blue);"></i> 仓位风险与期望回报监控 (ATR 止损/止盈)
+                                    </div>
+                                    <div class="risk-bar-container">
+                                        <div class="risk-bar-labels">
+                                            <span class="sl-label">止损 $ {{ formatNumber(maBotStatus.position.stop_loss) }}</span>
+                                            <span class="entry-label">开仓 $ {{ formatNumber(maBotStatus.position.avgPx) }}</span>
+                                            <span class="tp-label">止盈 $ {{ formatNumber(maBotStatus.position.take_profit) }}</span>
+                                        </div>
+                                        <div class="risk-bar-track">
+                                            <!-- The red loss zone: from SL to Entry -->
+                                            <div class="risk-zone-loss" :style="{ width: getPositionEntryProgress(maBotStatus.position) + '%' }"></div>
+                                            <!-- The green profit zone: from Entry to TP -->
+                                            <div class="risk-zone-profit" :style="{ left: getPositionEntryProgress(maBotStatus.position) + '%', width: (100 - getPositionEntryProgress(maBotStatus.position)) + '%' }"></div>
+                                            <!-- Current price marker -->
+                                            <div class="current-price-marker" :style="{ left: getPositionProgress(maBotStatus.position) + '%' }">
+                                                <span class="marker-tooltip">现价 $ {{ formatNumber(maBotStatus.price) }}</span>
+                                            </div>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
-                            <div v-else style="text-align: center; color: var(--text-muted); padding: 20px 0; font-style: italic;">
-                                <i class="fa-solid fa-ghost" style="font-size: 24px; margin-bottom: 8px; display: block; opacity: 0.4;"></i>
-                                当前无持仓 (等待 EMA+RSI 回调信号)
+                            <div v-else style="text-align: center; color: var(--text-muted); padding: 40px 0; display:flex; flex-direction:column; align-items:center; gap:12px;">
+                                <i class="fa-solid fa-ghost" style="font-size: 32px; opacity: 0.3; animation: floatUpDown 2.5s infinite ease-in-out;"></i>
+                                <div style="font-size: 13px; font-weight:500;">当前无活跃仓位</div>
+                                <div style="font-size: 11px; color:var(--text-muted); max-width:400px; line-height:1.6;">
+                                    实盘机器人正在持续监控 30m K线。当 EMA(200) 指示大趋势，且 RSI(14) 回调进入触发区间（多单 35-45，空单 55-65）时，将自动开仓并设立 ATR 止损止盈。
+                                </div>
                             </div>
                         </n-card>
                         
                         <!-- Row 3: Trade History Table -->
-                        <n-card title="交易记录" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 16px; margin-bottom: 20px;">
+                        <n-card title="交易记录" style="margin-bottom: 20px;">
                             <template #header-extra><i class="fa-solid fa-clock-rotate-left" style="color: var(--accent-blue); font-size: 16px;"></i></template>
                             <div class="table-scroll-container" style="overflow-x: auto;">
                                 <n-table :bordered="false" :single-line="false" class="data-table">
@@ -419,29 +498,41 @@
                         </n-card>
                         
                         <!-- Row 4: Logs -->
-                        <n-card title="策略实时运行日志" style="background: var(--panel-bg); border: 1px solid var(--panel-border); border-radius: 16px;">
+                        <n-card title="策略实时运行日志">
                             <div style="display:flex; flex-direction:column; gap:16px;">
                                 <div style="display:flex; justify-content:space-between; align-items:center;">
-                                    <div style="color: var(--text-secondary); font-size:13px;">
+                                    <div style="color: var(--text-secondary); font-size:12px;">
                                         <i class="fa-solid fa-circle-info" style="color:var(--accent-blue); margin-right:6px;"></i>
-                                        机器人在服务器后台独立运行，每 3 秒自动刷新数据。此仓位与网格策略完全隔离。
+                                        实盘后台进程每 3 秒刷新一次日志。此仓位独立执行交易逻辑，不影响其他手工或网格运行。
                                     </div>
-                                    <n-button type="info" size="small" @click="fetchMaBotInfo">
+                                    <n-button type="info" size="small" secondary @click="fetchMaBotInfo">
                                         <template #icon><i class="fa-solid fa-rotate"></i></template>
-                                        刷新
+                                        手动刷新
                                     </n-button>
                                 </div>
-                                <div class="log-console-container" style="background:#090d16; border: 1px solid rgba(255,255,255,0.05); border-radius:8px; padding:15px; font-family:'Courier New', Courier, monospace; font-size:12px; max-height:400px; min-height: 200px; overflow-y:auto; color:#a5b4fc; line-height:1.6;">
-                                    <div v-if="maBotLogs.length === 0" style="color: var(--text-muted); font-style: italic; text-align: center; padding: 40px 0;">
-                                        暂无日志记录。等待机器人启动...
+                                <div class="terminal-window">
+                                    <div class="terminal-header">
+                                        <div class="terminal-buttons">
+                                            <div class="terminal-btn red"></div>
+                                            <div class="terminal-btn yellow"></div>
+                                            <div class="terminal-btn green"></div>
+                                        </div>
+                                        <div class="terminal-title">ema_rsi_pullback_bot.log - bash</div>
+                                        <div class="terminal-placeholder"></div>
                                     </div>
-                                    <div v-for="(log, lIdx) in maBotLogs" :key="lIdx" :style="{
-                                        marginBottom: '4px',
-                                        borderBottom: '1px solid rgba(255,255,255,0.02)',
-                                        paddingBottom: '2px',
-                                        color: log.includes('⚡') ? '#fbbf24' : log.includes('ERROR') ? '#f87171' : log.includes('WARNING') ? '#fb923c' : '#a5b4fc'
-                                    }">
-                                        {{ log }}
+                                    <div class="log-console-container">
+                                        <div v-if="maBotLogs.length === 0" style="color: var(--text-muted); font-style: italic; text-align: center; padding: 40px 0;">
+                                            暂无日志记录。等待机器人启动...
+                                        </div>
+                                        <div v-for="(log, lIdx) in maBotLogs" :key="lIdx" class="log-line" :class="{
+                                            'error': log.includes('ERROR') || log.includes('ERR'),
+                                            'warning': log.includes('WARNING') || log.includes('⚠️'),
+                                            'signal': log.includes('golden_cross') || log.includes('death_cross') || log.includes('Signal'),
+                                            'trade': log.includes('Order') || log.includes('Open') || log.includes('Close') || log.includes('response'),
+                                            'info': !log.includes('ERROR') && !log.includes('WARNING') && !log.includes('⚠️') && !log.includes('golden_cross') && !log.includes('death_cross') && !log.includes('Signal') && !log.includes('Order') && !log.includes('Open') && !log.includes('Close')
+                                        }">
+                                            {{ log }}
+                                        </div>
                                     </div>
                                 </div>
                             </div>
@@ -451,7 +542,7 @@
             </div>
             
             <!-- Change Password Modal via Naive UI Modal component -->
-            <n-modal v-model:show="showPasswordModal" preset="card" style="width: 450px; background: rgba(22, 28, 45, 0.95); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 16px;" title="修改系统登录密码">
+            <n-modal v-model:show="showPasswordModal" preset="card" style="width: 450px;" title="修改系统登录密码">
                 <n-form @submit.prevent="handleChangePassword" label-placement="top">
                     <n-form-item label="当前密码">
                         <n-input type="password" show-password-on="mousedown" v-model:value="passwordForm.old" placeholder="输入当前密码" required />
@@ -470,7 +561,7 @@
                         {{ passwordForm.success }}
                     </n-alert>
                     
-                    <n-button type="primary" attr-type="submit" :loading="passwordForm.submitting" block size="large" style="background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border: none; font-weight: 600; margin-top: 16px;">
+                    <n-button type="primary" attr-type="submit" :loading="passwordForm.submitting" block size="large" style="margin-top: 16px; background: linear-gradient(135deg, var(--accent-blue), var(--accent-purple)); border: none; font-weight: 600;">
                         确认修改密码
                     </n-button>
                 </n-form>
