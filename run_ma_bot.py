@@ -5,18 +5,22 @@ import hmac
 import base64
 import json
 import logging
+from logging.handlers import RotatingFileHandler
 from datetime import datetime
 import requests
 import pandas as pd
 import numpy as np
 
 # Setup logging
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOG_FILE = os.path.join(SCRIPT_DIR, "ma_bot.log")
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("ma_bot.log", encoding="utf-8")
+        RotatingFileHandler(LOG_FILE, maxBytes=5*1024*1024, backupCount=5, encoding="utf-8")
     ]
 )
 logger = logging.getLogger("ma_bot")
@@ -69,12 +73,14 @@ def load_state():
     return default
 
 def save_state(state: dict):
-    """Persist bot state to disk."""
+    """Persist bot state to disk atomically."""
     try:
-        with open(STATE_FILE, "w") as f:
+        tmp_file = STATE_FILE + ".tmp"
+        with open(tmp_file, "w") as f:
             json.dump(state, f, indent=2)
+        os.replace(tmp_file, STATE_FILE)
     except Exception as e:
-        logger.warning(f"Failed to save state file: {e}")
+        logger.warning(f"Failed to save state file atomically: {e}")
 
 def record_trade(trade_info: dict):
     """Append a trade record to the trades JSON file."""
@@ -137,27 +143,31 @@ def private_request(method: str, path: str, params: dict = None, json_data: dict
         return None
 
 # Fetch candles
-def fetch_candles(inst_id, bar='30m', limit=100):
+def fetch_candles(inst_id, bar='30m', limit=100, max_retries=3):
     url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={limit}"
-    try:
-        res = requests.get(url, timeout=10).json()
-        if res.get("code") == "0" and res.get("data"):
-            data = res["data"]
-            df = pd.DataFrame(data, columns=[
-                'ts', 'open', 'high', 'low', 'close', 'vol', 'volCcy', 'volCcyQuote', 'confirm'
-            ])
-            for col in ['open', 'high', 'low', 'close', 'vol']:
-                df[col] = df[col].astype(float)
-            df['ts'] = df['ts'].astype(int)
-            # Reverse to chronological order (oldest first)
-            df = df.iloc[::-1].reset_index(drop=True)
-            return df
-        else:
-            logger.error(f"Error fetching candles: {res}")
-            return None
-    except Exception as e:
-        logger.error(f"Request failed in fetch_candles: {e}")
-        return None
+    for attempt in range(1, max_retries + 1):
+        try:
+            res = requests.get(url, timeout=10).json()
+            if res.get("code") == "0" and res.get("data"):
+                data = res["data"]
+                df = pd.DataFrame(data, columns=[
+                    'ts', 'open', 'high', 'low', 'close', 'vol', 'volCcy', 'volCcyQuote', 'confirm'
+                ])
+                for col in ['open', 'high', 'low', 'close', 'vol']:
+                    df[col] = df[col].astype(float)
+                df['ts'] = df['ts'].astype(int)
+                # Reverse to chronological order (oldest first)
+                df = df.iloc[::-1].reset_index(drop=True)
+                return df
+            else:
+                logger.error(f"Attempt {attempt}/{max_retries} - Error fetching candles: {res}")
+        except Exception as e:
+            logger.error(f"Attempt {attempt}/{max_retries} - Request failed in fetch_candles: {e}")
+        
+        if attempt < max_retries:
+            time.sleep(attempt * 2)
+            
+    return None
 
 def calculate_ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
@@ -339,10 +349,15 @@ def main_loop():
             
             if pos_side != "flat" and pos_sz > 0:
                 if pos_side == "long":
-                    if last_close <= state.get("stop_loss", 0.0):
+                    sl_val = state.get("stop_loss", 0.0)
+                    tp_val = state.get("take_profit", 0.0)
+                    if sl_val <= 0.0:
+                        logger.warning("⚠️ Long position is active on OKX but stop_loss state is 0.0 or missing!")
+                        
+                    if sl_val > 0.0 and last_close <= sl_val:
                         exit_triggered = True
                         exit_reason = "STOP_LOSS_ATR"
-                    elif last_close >= state.get("take_profit", 0.0):
+                    elif tp_val > 0.0 and last_close >= tp_val:
                         exit_triggered = True
                         exit_reason = "TAKE_PROFIT_ATR"
                     elif last_close < curr_ema:
@@ -352,13 +367,15 @@ def main_loop():
                         exit_triggered = True
                         exit_reason = "RSI_OVERBOUGHT_EXIT"
                 elif pos_side == "short":
-                    if last_close >= state.get("stop_loss", float('inf')) or (state.get("stop_loss", 0.0) == 0.0):
-                        # Guard condition: if stop_loss is 0.0 (e.g. state reset or missing), don't trigger stop loss instantly unless we're above infinity
-                        # or if we are actual short but SL is uninitialized.
-                        if state.get("stop_loss", 0.0) > 0.0 and last_close >= state.get("stop_loss", 0.0):
-                            exit_triggered = True
-                            exit_reason = "STOP_LOSS_ATR"
-                    elif state.get("take_profit", 0.0) > 0.0 and last_close <= state.get("take_profit", 0.0):
+                    sl_val = state.get("stop_loss", 0.0)
+                    tp_val = state.get("take_profit", 0.0)
+                    if sl_val <= 0.0:
+                        logger.warning("⚠️ Short position is active on OKX but stop_loss state is 0.0 or missing!")
+                        
+                    if sl_val > 0.0 and last_close >= sl_val:
+                        exit_triggered = True
+                        exit_reason = "STOP_LOSS_ATR"
+                    elif tp_val > 0.0 and last_close <= tp_val:
                         exit_triggered = True
                         exit_reason = "TAKE_PROFIT_ATR"
                     elif last_close > curr_ema:
@@ -379,25 +396,29 @@ def main_loop():
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Close response: {res}")
-                    record_trade({
-                        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "action": f"CLOSE_{pos_side.upper()}",
-                        "size": pos_sz, "price": last_close, "reason": exit_reason, "response": str(res)
-                    })
                     
-                    state["position_side"] = "flat"
-                    state["stop_loss"] = 0.0
-                    state["take_profit"] = 0.0
-                    state["last_signal"] = exit_reason.lower()
-                    save_state(state)
-                    time.sleep(60)
-                    continue
+                    if res and res.get("code") == "0":
+                        record_trade({
+                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "action": f"CLOSE_{pos_side.upper()}",
+                            "size": pos_sz, "price": last_close, "reason": exit_reason, "response": str(res)
+                        })
+                        state["position_side"] = "flat"
+                        state["stop_loss"] = 0.0
+                        state["take_profit"] = 0.0
+                        state["last_signal"] = exit_reason.lower()
+                        save_state(state)
+                        pos_side = "flat"
+                        pos_sz = 0.0
+                    else:
+                        logger.error(f"❌ Failed to execute close order on OKX: {res}")
                     
             # E. Entry execution
             already_acted = (current_candle_ts == state.get("last_acted_ts", 0))
             
             if long_entry_signal and not already_acted:
                 logger.info("⚡ Long Entry Signal triggered!")
+                opposite_closed = True
                 if pos_side == "short":
                     logger.info(f"Closing short (size={pos_sz})...")
                     close_pos_side = "short" if pos_mode == "long_short" else "net"
@@ -408,13 +429,20 @@ def main_loop():
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Close Short response: {res}")
-                    record_trade({
-                        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "action": "CLOSE_SHORT", "size": pos_sz, "price": last_close, "response": str(res)
-                    })
-                    time.sleep(2)
                     
-                if pos_side != "long":
+                    if res and res.get("code") == "0":
+                        record_trade({
+                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "action": "CLOSE_SHORT", "size": pos_sz, "price": last_close, "response": str(res)
+                        })
+                        pos_side = "flat"
+                        pos_sz = 0.0
+                        time.sleep(2)
+                    else:
+                        logger.error(f"❌ Failed to close opposite Short position: {res}")
+                        opposite_closed = False
+                    
+                if opposite_closed and pos_side != "long":
                     logger.info(f"Opening Long (size={target_sz})...")
                     open_pos_side = "long" if pos_mode == "long_short" else "net"
                     order_data = {
@@ -425,24 +453,28 @@ def main_loop():
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Open Long response: {res}")
                     
-                    sl = last_close - SL_ATR_MULT * comp_atr
-                    tp = last_close + TP_ATR_MULT * comp_atr
-                    
-                    state["last_acted_ts"] = current_candle_ts
-                    state["last_signal"] = "long_entry"
-                    state["position_side"] = "long"
-                    state["stop_loss"] = round(sl, 2)
-                    state["take_profit"] = round(tp, 2)
-                    save_state(state)
-                    
-                    record_trade({
-                        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "action": "OPEN_LONG", "size": target_sz, "price": last_close,
-                        "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
-                    })
+                    if res and res.get("code") == "0":
+                        sl = last_close - SL_ATR_MULT * comp_atr
+                        tp = last_close + TP_ATR_MULT * comp_atr
+                        
+                        state["last_acted_ts"] = current_candle_ts
+                        state["last_signal"] = "long_entry"
+                        state["position_side"] = "long"
+                        state["stop_loss"] = round(sl, 2)
+                        state["take_profit"] = round(tp, 2)
+                        save_state(state)
+                        
+                        record_trade({
+                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "action": "OPEN_LONG", "size": target_sz, "price": last_close,
+                            "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
+                        })
+                    else:
+                        logger.error(f"❌ Failed to open Long position: {res}")
                     
             elif short_entry_signal and not already_acted:
                 logger.info("⚡ Short Entry Signal triggered!")
+                opposite_closed = True
                 if pos_side == "long":
                     logger.info(f"Closing long (size={pos_sz})...")
                     close_pos_side = "long" if pos_mode == "long_short" else "net"
@@ -453,13 +485,20 @@ def main_loop():
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Close Long response: {res}")
-                    record_trade({
-                        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "action": "CLOSE_LONG", "size": pos_sz, "price": last_close, "response": str(res)
-                    })
-                    time.sleep(2)
                     
-                if pos_side != "short":
+                    if res and res.get("code") == "0":
+                        record_trade({
+                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "action": "CLOSE_LONG", "size": pos_sz, "price": last_close, "response": str(res)
+                        })
+                        pos_side = "flat"
+                        pos_sz = 0.0
+                        time.sleep(2)
+                    else:
+                        logger.error(f"❌ Failed to close opposite Long position: {res}")
+                        opposite_closed = False
+                    
+                if opposite_closed and pos_side != "short":
                     logger.info(f"Opening Short (size={target_sz})...")
                     open_pos_side = "short" if pos_mode == "long_short" else "net"
                     order_data = {
@@ -470,21 +509,24 @@ def main_loop():
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Open Short response: {res}")
                     
-                    sl = last_close + SL_ATR_MULT * comp_atr
-                    tp = last_close - TP_ATR_MULT * comp_atr
-                    
-                    state["last_acted_ts"] = current_candle_ts
-                    state["last_signal"] = "short_entry"
-                    state["position_side"] = "short"
-                    state["stop_loss"] = round(sl, 2)
-                    state["take_profit"] = round(tp, 2)
-                    save_state(state)
-                    
-                    record_trade({
-                        "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
-                        "action": "OPEN_SHORT", "size": target_sz, "price": last_close,
-                        "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
-                    })
+                    if res and res.get("code") == "0":
+                        sl = last_close + SL_ATR_MULT * comp_atr
+                        tp = last_close - TP_ATR_MULT * comp_atr
+                        
+                        state["last_acted_ts"] = current_candle_ts
+                        state["last_signal"] = "short_entry"
+                        state["position_side"] = "short"
+                        state["stop_loss"] = round(sl, 2)
+                        state["take_profit"] = round(tp, 2)
+                        save_state(state)
+                        
+                        record_trade({
+                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "action": "OPEN_SHORT", "size": target_sz, "price": last_close,
+                            "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
+                        })
+                    else:
+                        logger.error(f"❌ Failed to open Short position: {res}")
             
             elif (long_entry_signal or short_entry_signal) and already_acted:
                 logger.info(f"⚠️ Entry signal on candle ts={current_candle_ts} but ALREADY ACTED - skipping")
