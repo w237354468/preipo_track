@@ -793,11 +793,11 @@ async def get_ma_bot_status():
     """
     Returns the running status of the MA Crossover bot, including position data.
     """
-    log_path = "/app-mikro/ma_bot_output.log"
+    log_path = "/app-mikro/ma_bot.log"
     if not os.path.exists(log_path):
-        log_path = os.path.join(BASE_DIR, "ma_bot_output.log")
+        log_path = os.path.join(BASE_DIR, "ma_bot.log")
         if not os.path.exists(log_path):
-            log_path = os.path.join(BASE_DIR, "ma_bot.log")
+            log_path = os.path.join(BASE_DIR, "ma_bot_output.log")
             
     is_running = False
     
@@ -933,8 +933,10 @@ async def toggle_ma_bot_pause():
     state_data["is_paused"] = new_is_paused
     
     try:
-        with open(state_path, "w") as f:
+        tmp_file = state_path + ".tmp"
+        with open(tmp_file, "w") as f:
             json.dump(state_data, f, indent=2)
+        os.replace(tmp_file, state_path)
     except Exception as e:
         logger.error(f"Failed to save state file for toggle: {e}")
         return {"success": False, "error": f"Failed to save state: {str(e)}"}
@@ -961,11 +963,11 @@ async def get_ma_bot_logs():
     """
     Returns the last 100 lines of MA bot logs.
     """
-    log_path = "/app-mikro/ma_bot_output.log"
+    log_path = "/app-mikro/ma_bot.log"
     if not os.path.exists(log_path):
-        log_path = os.path.join(BASE_DIR, "ma_bot_output.log")
+        log_path = os.path.join(BASE_DIR, "ma_bot.log")
         if not os.path.exists(log_path):
-            log_path = os.path.join(BASE_DIR, "ma_bot.log")
+            log_path = os.path.join(BASE_DIR, "ma_bot_output.log")
             
     if not os.path.exists(log_path):
         return {"logs": ["暂无日志记录。机器人尚未启动或日志路径不正确。"]}

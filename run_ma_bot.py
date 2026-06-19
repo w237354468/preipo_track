@@ -6,7 +6,7 @@ import base64
 import json
 import logging
 from logging.handlers import RotatingFileHandler
-from datetime import datetime
+from datetime import datetime, timezone
 import requests
 import pandas as pd
 import numpy as np
@@ -53,7 +53,6 @@ if not API_KEY or not SECRET_KEY or not PASSPHRASE:
 SIMULATED = (ENV_TYPE == "demo")
 BASE_URL = "https://www.okx.com"
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 STATE_FILE = os.path.join(SCRIPT_DIR, "ma_bot_state.json")
 TRADES_FILE = os.path.join(SCRIPT_DIR, "ma_bot_trades.json")
 
@@ -83,7 +82,7 @@ def save_state(state: dict):
         logger.warning(f"Failed to save state file atomically: {e}")
 
 def record_trade(trade_info: dict):
-    """Append a trade record to the trades JSON file."""
+    """Append a trade record to the trades JSON file (atomic write)."""
     trades = []
     if os.path.exists(TRADES_FILE):
         try:
@@ -95,8 +94,10 @@ def record_trade(trade_info: dict):
     # Keep last 200 trades
     trades = trades[-200:]
     try:
-        with open(TRADES_FILE, "w") as f:
+        tmp_file = TRADES_FILE + ".tmp"
+        with open(tmp_file, "w") as f:
             json.dump(trades, f, indent=2, ensure_ascii=False)
+        os.replace(tmp_file, TRADES_FILE)
     except Exception as e:
         logger.warning(f"Failed to save trades file: {e}")
 
@@ -105,7 +106,7 @@ def record_trade(trade_info: dict):
 # OKX API helpers
 # ────────────────────────────────────────────────────────────
 def get_okx_headers(method: str, request_path: str, body: str = "") -> dict:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     timestamp = now.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
     prehash = timestamp + method + request_path + body
     mac = hmac.new(bytes(SECRET_KEY, encoding='utf8'), bytes(prehash, encoding='utf8'), digestmod='sha256')
@@ -321,6 +322,15 @@ def main_loop():
             else:
                 logger.error(f"Failed to fetch positions from OKX: {pos_res}")
                 
+            # Sync: if exchange says flat but state thinks we have a position, reset state
+            if pos_side == "flat" and state.get("position_side", "flat") != "flat":
+                logger.warning(f"⚠️ 交易所无持仓，但状态文件记录 position_side={state['position_side']}，同步重置为 flat...")
+                state["position_side"] = "flat"
+                state["stop_loss"] = 0.0
+                state["take_profit"] = 0.0
+                state["last_signal"] = "sync_reset"
+                save_state(state)
+            
             logger.info(
                 f"Position: side={pos_side} | size={pos_sz} | avgPx={pos_avg_px:.2f} | "
                 f"upl={pos_upl:.4f} | uplRatio={pos_upl_ratio:.2f}% | SL={state.get('stop_loss', 0.0):.2f} | TP={state.get('take_profit', 0.0):.2f}"
@@ -352,15 +362,18 @@ def main_loop():
                     sl_val = state.get("stop_loss", 0.0)
                     tp_val = state.get("take_profit", 0.0)
                     if sl_val <= 0.0:
-                        logger.warning("⚠️ Long position is active on OKX but stop_loss state is 0.0 or missing! Re-calculating SL/TP based on entry price and current ATR...")
-                        sl = pos_avg_px - SL_ATR_MULT * comp_atr
-                        tp = pos_avg_px + TP_ATR_MULT * comp_atr
-                        state["stop_loss"] = round(sl, 2)
-                        state["take_profit"] = round(tp, 2)
-                        state["position_side"] = "long"
-                        save_state(state)
-                        sl_val = state["stop_loss"]
-                        tp_val = state["take_profit"]
+                        if pos_avg_px > 0.0:
+                            logger.warning("⚠️ Long position is active on OKX but stop_loss state is 0.0 or missing! Re-calculating SL/TP based on entry price and current ATR...")
+                            sl = pos_avg_px - SL_ATR_MULT * comp_atr
+                            tp = pos_avg_px + TP_ATR_MULT * comp_atr
+                            state["stop_loss"] = round(sl, 2)
+                            state["take_profit"] = round(tp, 2)
+                            state["position_side"] = "long"
+                            save_state(state)
+                            sl_val = state["stop_loss"]
+                            tp_val = state["take_profit"]
+                        else:
+                            logger.error("❌ Long position active but avgPx is 0 — cannot re-calculate SL/TP, skipping exit checks")
                         
                     if sl_val > 0.0 and last_close <= sl_val:
                         exit_triggered = True
@@ -378,15 +391,18 @@ def main_loop():
                     sl_val = state.get("stop_loss", 0.0)
                     tp_val = state.get("take_profit", 0.0)
                     if sl_val <= 0.0:
-                        logger.warning("⚠️ Short position is active on OKX but stop_loss state is 0.0 or missing! Re-calculating SL/TP based on entry price and current ATR...")
-                        sl = pos_avg_px + SL_ATR_MULT * comp_atr
-                        tp = pos_avg_px - TP_ATR_MULT * comp_atr
-                        state["stop_loss"] = round(sl, 2)
-                        state["take_profit"] = round(tp, 2)
-                        state["position_side"] = "short"
-                        save_state(state)
-                        sl_val = state["stop_loss"]
-                        tp_val = state["take_profit"]
+                        if pos_avg_px > 0.0:
+                            logger.warning("⚠️ Short position is active on OKX but stop_loss state is 0.0 or missing! Re-calculating SL/TP based on entry price and current ATR...")
+                            sl = pos_avg_px + SL_ATR_MULT * comp_atr
+                            tp = pos_avg_px - TP_ATR_MULT * comp_atr
+                            state["stop_loss"] = round(sl, 2)
+                            state["take_profit"] = round(tp, 2)
+                            state["position_side"] = "short"
+                            save_state(state)
+                            sl_val = state["stop_loss"]
+                            tp_val = state["take_profit"]
+                        else:
+                            logger.error("❌ Short position active but avgPx is 0 — cannot re-calculate SL/TP, skipping exit checks")
                         
                     if sl_val > 0.0 and last_close >= sl_val:
                         exit_triggered = True
@@ -415,7 +431,7 @@ def main_loop():
                     
                     if res and res.get("code") == "0":
                         record_trade({
-                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                             "action": f"CLOSE_{pos_side.upper()}",
                             "size": pos_sz, "price": last_close, "reason": exit_reason, "response": str(res)
                         })
@@ -448,7 +464,7 @@ def main_loop():
                     
                     if res and res.get("code") == "0":
                         record_trade({
-                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                             "action": "CLOSE_SHORT", "size": pos_sz, "price": last_close, "response": str(res)
                         })
                         pos_side = "flat"
@@ -481,7 +497,7 @@ def main_loop():
                         save_state(state)
                         
                         record_trade({
-                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                             "action": "OPEN_LONG", "size": target_sz, "price": last_close,
                             "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
                         })
@@ -504,7 +520,7 @@ def main_loop():
                     
                     if res and res.get("code") == "0":
                         record_trade({
-                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                             "action": "CLOSE_LONG", "size": pos_sz, "price": last_close, "response": str(res)
                         })
                         pos_side = "flat"
@@ -537,7 +553,7 @@ def main_loop():
                         save_state(state)
                         
                         record_trade({
-                            "time": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+                            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                             "action": "OPEN_SHORT", "size": target_sz, "price": last_close,
                             "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
                         })
