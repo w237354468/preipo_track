@@ -219,7 +219,7 @@ def main_loop():
     lev_res = private_request("POST", "/api/v5/account/set-leverage", json_data={
         "instId": inst_id,
         "lever": str(leverage),
-        "mgnMode": "cross"
+        "mgnMode": "isolated"
     })
     logger.info(f"Leverage setup response: {lev_res}")
     
@@ -277,7 +277,7 @@ def main_loop():
             if pos_res and pos_res.get("code") == "0":
                 data = pos_res.get("data", [])
                 for p in data:
-                    if p.get("instId") == inst_id and p.get("mgnMode") == "cross":
+                    if p.get("instId") == inst_id and p.get("mgnMode") == "isolated":
                         p_sz = float(p.get("pos", "0") or "0")
                         p_side = p.get("posSide")
                         
@@ -366,7 +366,7 @@ def main_loop():
                     close_side = "sell" if pos_side == "long" else "buy"
                     close_pos_side = pos_side if pos_mode == "long_short" else "net"
                     order_data = {
-                        "instId": inst_id, "tdMode": "cross",
+                        "instId": inst_id, "tdMode": "isolated",
                         "side": close_side, "posSide": close_pos_side,
                         "ordType": "market", "sz": str(pos_sz)
                     }
@@ -395,7 +395,7 @@ def main_loop():
                     logger.info(f"Closing short (size={pos_sz})...")
                     close_pos_side = "short" if pos_mode == "long_short" else "net"
                     order_data = {
-                        "instId": inst_id, "tdMode": "cross",
+                        "instId": inst_id, "tdMode": "isolated",
                         "side": "buy", "posSide": close_pos_side,
                         "ordType": "market", "sz": str(pos_sz)
                     }
@@ -411,7 +411,7 @@ def main_loop():
                     logger.info(f"Opening Long (size={target_sz})...")
                     open_pos_side = "long" if pos_mode == "long_short" else "net"
                     order_data = {
-                        "instId": inst_id, "tdMode": "cross",
+                        "instId": inst_id, "tdMode": "isolated",
                         "side": "buy", "posSide": open_pos_side,
                         "ordType": "market", "sz": str(target_sz)
                     }
@@ -440,7 +440,7 @@ def main_loop():
                     logger.info(f"Closing long (size={pos_sz})...")
                     close_pos_side = "long" if pos_mode == "long_short" else "net"
                     order_data = {
-                        "instId": inst_id, "tdMode": "cross",
+                        "instId": inst_id, "tdMode": "isolated",
                         "side": "sell", "posSide": close_pos_side,
                         "ordType": "market", "sz": str(pos_sz)
                     }
@@ -456,7 +456,7 @@ def main_loop():
                     logger.info(f"Opening Short (size={target_sz})...")
                     open_pos_side = "short" if pos_mode == "long_short" else "net"
                     order_data = {
-                        "instId": inst_id, "tdMode": "cross",
+                        "instId": inst_id, "tdMode": "isolated",
                         "side": "sell", "posSide": open_pos_side,
                         "ordType": "market", "sz": str(target_sz)
                     }
