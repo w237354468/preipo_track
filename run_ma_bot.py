@@ -352,7 +352,15 @@ def main_loop():
                     sl_val = state.get("stop_loss", 0.0)
                     tp_val = state.get("take_profit", 0.0)
                     if sl_val <= 0.0:
-                        logger.warning("⚠️ Long position is active on OKX but stop_loss state is 0.0 or missing!")
+                        logger.warning("⚠️ Long position is active on OKX but stop_loss state is 0.0 or missing! Re-calculating SL/TP based on entry price and current ATR...")
+                        sl = pos_avg_px - SL_ATR_MULT * comp_atr
+                        tp = pos_avg_px + TP_ATR_MULT * comp_atr
+                        state["stop_loss"] = round(sl, 2)
+                        state["take_profit"] = round(tp, 2)
+                        state["position_side"] = "long"
+                        save_state(state)
+                        sl_val = state["stop_loss"]
+                        tp_val = state["take_profit"]
                         
                     if sl_val > 0.0 and last_close <= sl_val:
                         exit_triggered = True
@@ -370,7 +378,15 @@ def main_loop():
                     sl_val = state.get("stop_loss", 0.0)
                     tp_val = state.get("take_profit", 0.0)
                     if sl_val <= 0.0:
-                        logger.warning("⚠️ Short position is active on OKX but stop_loss state is 0.0 or missing!")
+                        logger.warning("⚠️ Short position is active on OKX but stop_loss state is 0.0 or missing! Re-calculating SL/TP based on entry price and current ATR...")
+                        sl = pos_avg_px + SL_ATR_MULT * comp_atr
+                        tp = pos_avg_px - TP_ATR_MULT * comp_atr
+                        state["stop_loss"] = round(sl, 2)
+                        state["take_profit"] = round(tp, 2)
+                        state["position_side"] = "short"
+                        save_state(state)
+                        sl_val = state["stop_loss"]
+                        tp_val = state["take_profit"]
                         
                     if sl_val > 0.0 and last_close >= sl_val:
                         exit_triggered = True
