@@ -61,7 +61,7 @@ TRADES_FILE = os.path.join(SCRIPT_DIR, "ma_bot_trades.json")
 # ────────────────────────────────────────────────────────────
 def load_state():
     """Load bot state from disk. Returns dict with last_acted_ts, last_signal, etc."""
-    default = {"last_acted_ts": 0, "last_signal": "none", "position_side": "flat", "peak_upl_ratio": 0.0}
+    default = {"last_acted_ts": 0, "last_signal": "none", "position_side": "flat", "peak_upl_ratio": 0.0, "position_size": 0.0, "tp_order_id": ""}
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r") as f:
@@ -354,10 +354,41 @@ def main_loop():
             # Sync: if exchange says flat but state thinks we have a position, reset state
             if pos_side == "flat" and state.get("position_side", "flat") != "flat":
                 logger.warning(f"⚠️ 交易所无持仓，但状态文件记录 position_side={state['position_side']}，同步重置为 flat...")
+                
+                # Check if it was closed via the resting TP order
+                tp_order_id = state.get("tp_order_id", "")
+                was_tp_filled = False
+                if tp_order_id:
+                    logger.info(f"Checking status of resting TP order: {tp_order_id}")
+                    order_status_res = private_request("GET", "/api/v5/trade/order", params={"instId": inst_id, "ordId": tp_order_id})
+                    if order_status_res and order_status_res.get("code") == "0" and order_status_res.get("data"):
+                        ord_state = order_status_res["data"][0].get("state")
+                        if ord_state == "filled":
+                            logger.info(f"🎉 Confirming resting Limit TP order was filled on exchange!")
+                            was_tp_filled = True
+                            
+                if was_tp_filled:
+                    record_trade({
+                        "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                        "action": f"CLOSE_{state['position_side'].upper()}",
+                        "size": state.get("position_size", 0.0),
+                        "price": state.get("take_profit", last_close),
+                        "reason": "TAKE_PROFIT_LIMIT",
+                        "response": "Limit order filled"
+                    })
+                    state["last_signal"] = "take_profit_limit"
+                else:
+                    # Cancel TP order just in case it remains open (e.g. manual close or liquidation)
+                    if tp_order_id:
+                        logger.info(f"Cancelling stale TP order on exchange: {tp_order_id}")
+                        private_request("POST", "/api/v5/trade/cancel-order", json_data={"instId": inst_id, "ordId": tp_order_id})
+                    state["last_signal"] = "sync_reset"
+                    
                 state["position_side"] = "flat"
                 state["stop_loss"] = 0.0
                 state["take_profit"] = 0.0
-                state["last_signal"] = "sync_reset"
+                state["position_size"] = 0.0
+                state["tp_order_id"] = ""
                 save_state(state)
             
             logger.info(
@@ -408,9 +439,6 @@ def main_loop():
                     if sl_val > 0.0 and last_close <= sl_val:
                         exit_triggered = True
                         exit_reason = "STOP_LOSS_ATR"
-                    elif tp_val > 0.0 and last_close >= tp_val:
-                        exit_triggered = True
-                        exit_reason = "TAKE_PROFIT_ATR"
                     elif last_close < curr_ema:
                         exit_triggered = True
                         exit_reason = "EMA_CROSS_EXIT"
@@ -437,9 +465,6 @@ def main_loop():
                     if sl_val > 0.0 and last_close >= sl_val:
                         exit_triggered = True
                         exit_reason = "STOP_LOSS_ATR"
-                    elif tp_val > 0.0 and last_close <= tp_val:
-                        exit_triggered = True
-                        exit_reason = "TAKE_PROFIT_ATR"
                     elif last_close > curr_ema:
                         exit_triggered = True
                         exit_reason = "EMA_CROSS_EXIT"
@@ -451,6 +476,18 @@ def main_loop():
                     logger.info(f"⚡ EXIT TRIGGERED: {exit_reason} (Close: {last_close:.2f})")
                     close_side = "sell" if pos_side == "long" else "buy"
                     close_pos_side = pos_side if pos_mode == "long_short" else "net"
+                    
+                    # Cancel resting TP order if it exists
+                    tp_order_id = state.get("tp_order_id")
+                    if tp_order_id:
+                        logger.info(f"Cancelling resting TP order: {tp_order_id}")
+                        cancel_res = private_request("POST", "/api/v5/trade/cancel-order", json_data={
+                            "instId": inst_id, "ordId": tp_order_id
+                        })
+                        logger.info(f"Cancel TP order response: {cancel_res}")
+                        state["tp_order_id"] = ""
+                        save_state(state)
+                        
                     order_data = {
                         "instId": inst_id, "tdMode": "isolated",
                         "side": close_side, "posSide": close_pos_side,
@@ -468,6 +505,7 @@ def main_loop():
                         state["position_side"] = "flat"
                         state["stop_loss"] = 0.0
                         state["take_profit"] = 0.0
+                        state["position_size"] = 0.0
                         state["last_signal"] = exit_reason.lower()
                         save_state(state)
                         pos_side = "flat"
@@ -522,8 +560,10 @@ def main_loop():
                         state["last_acted_ts"] = current_candle_ts
                         state["last_signal"] = "long_entry"
                         state["position_side"] = "long"
+                        state["position_size"] = target_sz
                         state["stop_loss"] = round(sl, 2)
                         state["take_profit"] = round(tp, 2)
+                        state["tp_order_id"] = ""
                         save_state(state)
                         
                         record_trade({
@@ -531,6 +571,25 @@ def main_loop():
                             "action": "OPEN_LONG", "size": target_sz, "price": last_close,
                             "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
                         })
+                        
+                        # Place resting limit TP order on OKX
+                        tp_side = "sell"
+                        tp_pos_side = "long" if pos_mode == "long_short" else "net"
+                        tp_order_data = {
+                            "instId": inst_id, "tdMode": "isolated",
+                            "side": tp_side, "posSide": tp_pos_side,
+                            "ordType": "limit", "px": str(round(tp, 2)),
+                            "sz": format_size(target_sz, lot_sz),
+                            "reduceOnly": True
+                        }
+                        logger.info(f"Placing resting Limit TP order at price {round(tp, 2)}...")
+                        tp_res = private_request("POST", "/api/v5/trade/order", json_data=tp_order_data)
+                        logger.info(f"Place Limit TP response: {tp_res}")
+                        if tp_res and tp_res.get("code") == "0":
+                            state["tp_order_id"] = tp_res["data"][0]["ordId"]
+                            save_state(state)
+                        else:
+                            logger.error(f"❌ Failed to place resting Limit TP order: {tp_res}")
                     else:
                         logger.error(f"❌ Failed to open Long position: {res}")
                     
@@ -578,8 +637,10 @@ def main_loop():
                         state["last_acted_ts"] = current_candle_ts
                         state["last_signal"] = "short_entry"
                         state["position_side"] = "short"
+                        state["position_size"] = target_sz
                         state["stop_loss"] = round(sl, 2)
                         state["take_profit"] = round(tp, 2)
+                        state["tp_order_id"] = ""
                         save_state(state)
                         
                         record_trade({
@@ -587,6 +648,25 @@ def main_loop():
                             "action": "OPEN_SHORT", "size": target_sz, "price": last_close,
                             "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
                         })
+                        
+                        # Place resting limit TP order on OKX
+                        tp_side = "buy"
+                        tp_pos_side = "short" if pos_mode == "long_short" else "net"
+                        tp_order_data = {
+                            "instId": inst_id, "tdMode": "isolated",
+                            "side": tp_side, "posSide": tp_pos_side,
+                            "ordType": "limit", "px": str(round(tp, 2)),
+                            "sz": format_size(target_sz, lot_sz),
+                            "reduceOnly": True
+                        }
+                        logger.info(f"Placing resting Limit TP order at price {round(tp, 2)}...")
+                        tp_res = private_request("POST", "/api/v5/trade/order", json_data=tp_order_data)
+                        logger.info(f"Place Limit TP response: {tp_res}")
+                        if tp_res and tp_res.get("code") == "0":
+                            state["tp_order_id"] = tp_res["data"][0]["ordId"]
+                            save_state(state)
+                        else:
+                            logger.error(f"❌ Failed to place resting Limit TP order: {tp_res}")
                     else:
                         logger.error(f"❌ Failed to open Short position: {res}")
             
