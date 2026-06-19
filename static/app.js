@@ -571,6 +571,7 @@ const DashboardApp = {
             maBotTrades,
             chartTimestamp,
             refreshChart,
+            apiBase,
             fetchMaBotInfo,
             toggleMaBotPause
         };
