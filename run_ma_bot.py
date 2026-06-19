@@ -272,8 +272,8 @@ def main_loop():
                 time.sleep(10)
                 continue
 
-            # A. Fetch candles (at least 250 candles to compute EMA 200)
-            df = fetch_candles(inst_id, bar='30m', limit=250)
+            # A. Fetch candles (at least 600 candles to compute EMA 200 accurately and avoid drift)
+            df = fetch_candles(inst_id, bar='30m', limit=600)
             if df is None or len(df) < 220:
                 logger.warning("Not enough candles fetched, waiting...")
                 time.sleep(30)
@@ -430,6 +430,7 @@ def main_loop():
                             state["stop_loss"] = round(sl, 2)
                             state["take_profit"] = round(tp, 2)
                             state["position_side"] = "long"
+                            state["position_size"] = pos_sz
                             save_state(state)
                             sl_val = state["stop_loss"]
                             tp_val = state["take_profit"]
@@ -456,6 +457,7 @@ def main_loop():
                             state["stop_loss"] = round(sl, 2)
                             state["take_profit"] = round(tp, 2)
                             state["position_side"] = "short"
+                            state["position_size"] = pos_sz
                             save_state(state)
                             sl_val = state["stop_loss"]
                             tp_val = state["take_profit"]
@@ -481,22 +483,44 @@ def main_loop():
                     tp_order_id = state.get("tp_order_id")
                     if tp_order_id:
                         logger.info(f"Cancelling resting TP order: {tp_order_id}")
-                        cancel_res = private_request("POST", "/api/v5/trade/cancel-order", json_data={
-                            "instId": inst_id, "ordId": tp_order_id
-                        })
-                        logger.info(f"Cancel TP order response: {cancel_res}")
+                        cancel_success = False
+                        for attempt in range(3):
+                            cancel_res = private_request("POST", "/api/v5/trade/cancel-order", json_data={
+                                "instId": inst_id, "ordId": tp_order_id
+                            })
+                            # code "0" indicates success, or "51401" means order does not exist / already canceled
+                            if cancel_res and (cancel_res.get("code") == "0" or cancel_res.get("code") == "51401"):
+                                logger.info(f"TP order cancelled successfully or already inactive (Response: {cancel_res})")
+                                cancel_success = True
+                                break
+                            else:
+                                logger.warning(f"Attempt {attempt+1}/3 to cancel TP order failed: {cancel_res}. Retrying...")
+                                time.sleep(0.5)
+                        
                         state["tp_order_id"] = ""
                         save_state(state)
                         
                     order_data = {
                         "instId": inst_id, "tdMode": "isolated",
                         "side": close_side, "posSide": close_pos_side,
-                        "ordType": "market", "sz": format_size(pos_sz, lot_sz)
+                        "ordType": "market", "sz": format_size(pos_sz, lot_sz),
+                        "reduceOnly": True
                     }
-                    res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
-                    logger.info(f"Close response: {res}")
                     
-                    if res and res.get("code") == "0":
+                    # Try to execute close order with retries
+                    order_executed = False
+                    for attempt in range(5):
+                        res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
+                        logger.info(f"Close attempt {attempt+1} response: {res}")
+                        if res and res.get("code") == "0":
+                            logger.info(f"🎉 Close position order filled successfully on attempt {attempt+1}")
+                            order_executed = True
+                            break
+                        else:
+                            logger.error(f"❌ Attempt {attempt+1}/5 - Close order failed: {res}. Retrying in 1s...")
+                            time.sleep(1)
+                    
+                    if order_executed:
                         record_trade({
                             "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                             "action": f"CLOSE_{pos_side.upper()}",
@@ -511,8 +535,67 @@ def main_loop():
                         pos_side = "flat"
                         pos_sz = 0.0
                     else:
-                        logger.error(f"❌ Failed to execute close order on OKX: {res}")
+                        logger.critical(f"🚨 CRITICAL: Failed to execute close order on OKX after 5 attempts! Reason: {exit_reason}")
+            
+            # Ensure resting Limit TP order is active on the exchange
+            if pos_side != "flat" and pos_sz > 0 and not exit_triggered:
+                try:
+                    pending_res = private_request("GET", "/api/v5/trade/orders-pending", params={"instId": inst_id})
+                    tp_found = False
+                    tp_order_id = state.get("tp_order_id", "")
                     
+                    if pending_res and pending_res.get("code") == "0":
+                        pending_orders = pending_res.get("data", [])
+                        for ord in pending_orders:
+                            if ord.get("ordId") == tp_order_id:
+                                tp_found = True
+                                break
+                        
+                        # If not found by ID, check if there's any limit order that looks like our TP order
+                        if not tp_found:
+                            target_side = "sell" if pos_side == "long" else "buy"
+                            target_pos_side = pos_side if pos_mode == "long_short" else "net"
+                            for ord in pending_orders:
+                                if (ord.get("ordType") == "limit" and 
+                                    ord.get("side") == target_side and 
+                                    ord.get("posSide") == target_pos_side):
+                                    logger.info(f"Adopting existing pending limit order on exchange as TP: {ord.get('ordId')}")
+                                    state["tp_order_id"] = ord.get("ordId")
+                                    save_state(state)
+                                    tp_found = True
+                                    break
+                    else:
+                        logger.error(f"Failed to fetch pending orders: {pending_res}")
+                        tp_found = True  # Avoid placing duplicate orders if API request failed
+                    
+                    if not tp_found:
+                        tp_val = state.get("take_profit", 0.0)
+                        if tp_val <= 0.0:
+                            tp = pos_avg_px + (TP_ATR_MULT * comp_atr if pos_side == "long" else -TP_ATR_MULT * comp_atr)
+                            state["take_profit"] = round(tp, 2)
+                            save_state(state)
+                            tp_val = state["take_profit"]
+                            
+                        tp_side = "sell" if pos_side == "long" else "buy"
+                        tp_pos_side = pos_side if pos_mode == "long_short" else "net"
+                        tp_order_data = {
+                            "instId": inst_id, "tdMode": "isolated",
+                            "side": tp_side, "posSide": tp_pos_side,
+                            "ordType": "limit", "px": str(round(tp_val, 2)),
+                            "sz": format_size(pos_sz, lot_sz),
+                            "reduceOnly": True
+                        }
+                        logger.info(f"Resting Limit TP order is missing or cancelled. Placing new one at price {round(tp_val, 2)}...")
+                        tp_res = private_request("POST", "/api/v5/trade/order", json_data=tp_order_data)
+                        logger.info(f"Place Limit TP response: {tp_res}")
+                        if tp_res and tp_res.get("code") == "0":
+                            state["tp_order_id"] = tp_res["data"][0]["ordId"]
+                            save_state(state)
+                        else:
+                            logger.error(f"❌ Failed to re-place resting Limit TP order: {tp_res}")
+                except Exception as tp_ex:
+                    logger.error(f"Error ensuring TP order is active: {tp_ex}")
+            
             # E. Entry execution
             already_acted = (current_candle_ts == state.get("last_acted_ts", 0))
             
@@ -525,7 +608,8 @@ def main_loop():
                     order_data = {
                         "instId": inst_id, "tdMode": "isolated",
                         "side": "buy", "posSide": close_pos_side,
-                        "ordType": "market", "sz": format_size(pos_sz, lot_sz)
+                        "ordType": "market", "sz": format_size(pos_sz, lot_sz),
+                        "reduceOnly": True
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Close Short response: {res}")
@@ -602,7 +686,8 @@ def main_loop():
                     order_data = {
                         "instId": inst_id, "tdMode": "isolated",
                         "side": "sell", "posSide": close_pos_side,
-                        "ordType": "market", "sz": format_size(pos_sz, lot_sz)
+                        "ordType": "market", "sz": format_size(pos_sz, lot_sz),
+                        "reduceOnly": True
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Close Long response: {res}")
