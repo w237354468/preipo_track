@@ -892,6 +892,7 @@ async def get_ma_bot_status():
             
     return {
         "is_running": is_running,
+        "is_paused": state_data.get("is_paused", False),
         "last_time": last_time,
         "price": price,
         "fast_ma": fast_ma,
@@ -909,6 +910,36 @@ async def get_ma_bot_status():
         "balance": avail_balance,
         "last_signal": state_data.get("last_signal", "none"),
     }
+
+@app.post("/api/ma-bot/toggle")
+async def toggle_ma_bot_pause():
+    """
+    Toggles the is_paused state of the MA bot in its state file.
+    """
+    state_path = "/app-mikro/ma_bot_state.json"
+    if not os.path.exists(state_path):
+        state_path = os.path.join(BASE_DIR, "ma_bot_state.json")
+        
+    state_data = {}
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r") as f:
+                state_data = json.load(f)
+        except Exception as e:
+            logger.warning(f"Failed to load state file for toggle: {e}")
+            
+    is_paused = state_data.get("is_paused", False)
+    new_is_paused = not is_paused
+    state_data["is_paused"] = new_is_paused
+    
+    try:
+        with open(state_path, "w") as f:
+            json.dump(state_data, f, indent=2)
+    except Exception as e:
+        logger.error(f"Failed to save state file for toggle: {e}")
+        return {"success": False, "error": f"Failed to save state: {str(e)}"}
+        
+    return {"success": True, "is_paused": new_is_paused}
 
 @app.get("/api/ma-bot/trades")
 async def get_ma_bot_trades():

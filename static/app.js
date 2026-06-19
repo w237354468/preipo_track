@@ -34,6 +34,7 @@ const DashboardApp = {
         // MA Bot States
         const maBotStatus = ref({
             is_running: false,
+            is_paused: false,
             last_time: null,
             price: null,
             fast_ma: null,
@@ -358,6 +359,28 @@ const DashboardApp = {
                 console.error("Error fetching MA bot info:", err);
             }
         }
+
+        async function toggleMaBotPause() {
+            try {
+                const res = await fetch(apiBase + '/api/ma-bot/toggle', {
+                    method: 'POST'
+                });
+                if (res.ok) {
+                    const data = await res.json();
+                    if (data.success) {
+                        maBotStatus.value.is_paused = data.is_paused;
+                        message.success(data.is_paused ? '策略已暂停' : '策略已恢复运行');
+                    } else {
+                        message.error('操作失败: ' + data.error);
+                    }
+                } else {
+                    message.error('网络请求失败，状态码: ' + res.status);
+                }
+            } catch (err) {
+                console.error("Error toggling MA bot pause state:", err);
+                message.error('网络请求失败');
+            }
+        }
         
         // Formatting Helpers
         function formatUSD(val) {
@@ -533,7 +556,8 @@ const DashboardApp = {
             maBotStatus,
             maBotLogs,
             maBotTrades,
-            fetchMaBotInfo
+            fetchMaBotInfo,
+            toggleMaBotPause
         };
     }
 };

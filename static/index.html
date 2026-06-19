@@ -307,15 +307,24 @@
                                     <div class="stat-card-inner" style="padding: 16px;">
                                         <div class="stat-info">
                                             <span class="stat-label">运行状态</span>
-                                            <n-tag :type="maBotStatus.is_running ? 'success' : 'error'" size="medium" style="font-weight: 700; margin-top: 4px;">
-                                                {{ maBotStatus.is_running ? '运行中' : '已停止' }}
+                                            <n-tag :type="!maBotStatus.is_running ? 'error' : (maBotStatus.is_paused ? 'warning' : 'success')" size="medium" style="font-weight: 700; margin-top: 4px;">
+                                                {{ !maBotStatus.is_running ? '已停止' : (maBotStatus.is_paused ? '已暂停' : '运行中') }}
                                             </n-tag>
+                                            <n-button 
+                                                v-if="maBotStatus.is_running" 
+                                                size="tiny" 
+                                                :type="maBotStatus.is_paused ? 'success' : 'warning'" 
+                                                style="margin-top: 6px; font-weight: 600;" 
+                                                @click="toggleMaBotPause"
+                                            >
+                                                {{ maBotStatus.is_paused ? '恢复策略' : '暂停策略' }}
+                                            </n-button>
                                             <span style="margin-top: 4px; color: var(--text-muted); font-size: 9px; font-family: monospace;">
                                                 {{ maBotStatus.last_time ? maBotStatus.last_time.split(' ')[1] : '--' }}
                                             </span>
                                         </div>
-                                        <div class="stat-icon-wrapper" :class="maBotStatus.is_running ? 'green' : 'red'" style="width: 36px; height: 36px; font-size: 14px; border-radius: 8px;">
-                                            <i class="fa-solid" :class="maBotStatus.is_running ? 'fa-play' : 'fa-stop'"></i>
+                                        <div class="stat-icon-wrapper" :class="!maBotStatus.is_running ? 'red' : (maBotStatus.is_paused ? 'yellow' : 'green')" style="width: 36px; height: 36px; font-size: 14px; border-radius: 8px;">
+                                            <i class="fa-solid" :class="!maBotStatus.is_running ? 'fa-stop' : (maBotStatus.is_paused ? 'fa-pause' : 'fa-play')"></i>
                                         </div>
                                     </div>
                                 </n-card>
@@ -632,7 +641,7 @@
     <!-- Load Vue 3, Naive UI locally -->
     <script src="vue.global.js?v=20260618_1"></script>
     <script src="naive-ui.js?v=20260618_1"></script>
-    <script src="app.js?v=20260619_1"></script>
+    <script src="app.js?v=20260619_2"></script>
 </body>
 </html>
 

@@ -225,6 +225,13 @@ def main_loop():
     
     while True:
         try:
+            # Check if paused by user
+            state = load_state()
+            if state.get("is_paused", False):
+                logger.info("Bot is PAUSED by user. Sleeping for 10 seconds...")
+                time.sleep(10)
+                continue
+
             # A. Fetch candles (at least 250 candles to compute EMA 200)
             df = fetch_candles(inst_id, bar='30m', limit=250)
             if df is None or len(df) < 220:
