@@ -336,7 +336,7 @@
                                         <div class="stat-info">
                                             <span class="stat-label">最新价格</span>
                                             <h3 class="crypto-numeric" style="color:#ffffff; font-size:16px; font-weight:700; margin-top: 4px;">$ {{ maBotStatus.price ? formatNumber(maBotStatus.price) : '--' }}</h3>
-                                            <span style="color: var(--text-muted); font-size: 9px; margin-top: 2px;">AP-USDT-SWAP</span>
+                                            <span style="color: var(--text-muted); font-size: 9px; margin-top: 2px;">ANTHROPIC-USDT-SWAP</span>
                                         </div>
                                         <div class="stat-icon-wrapper blue" style="width: 36px; height: 36px; font-size: 14px; border-radius: 8px;">
                                             <i class="fa-solid fa-dollar-sign"></i>
@@ -524,6 +524,23 @@
                                             </div>
                                         </div>
 
+                                    </div>
+                                </n-card>
+                            </n-grid-item>
+                        </n-grid>
+                        
+                        <!-- Row 2.5: Strategy Real-time Chart -->
+                        <n-grid :cols="24" :x-gap="20" style="margin-bottom: 20px;">
+                            <n-grid-item :span="24">
+                                <n-card title="EMA+RSI 趋势回调策略实时图表 (30m)" style="width: 100%;">
+                                    <template #header-extra>
+                                        <n-button size="small" type="primary" secondary @click="refreshChart">
+                                            <template #icon><i class="fa-solid fa-rotate"></i></template>
+                                            刷新图表
+                                        </n-button>
+                                    </template>
+                                    <div style="text-align: center; width: 100%; min-height: 250px; display: flex; align-items: center; justify-content: center; background: #0f141c; border-radius: 6px;">
+                                        <img :src="apiBase + '/api/ma-bot/chart?t=' + chartTimestamp" style="max-width: 100%; height: auto; border-radius: 6px; border: 1px solid rgba(255,255,255,0.05);" alt="EMA+RSI Strategy Chart" />
                                     </div>
                                 </n-card>
                             </n-grid-item>

@@ -46,6 +46,12 @@ const DashboardApp = {
         });
         const maBotLogs = ref([]);
         const maBotTrades = ref([]);
+        const chartTimestamp = ref(Date.now());
+        let lastChartFetchTime = Date.now();
+        const refreshChart = () => {
+            chartTimestamp.value = Date.now();
+            lastChartFetchTime = Date.now();
+        };
         
         // Modal states
         const showPasswordModal = ref(false);
@@ -355,6 +361,13 @@ const DashboardApp = {
                     const tradesData = await tradesRes.json();
                     maBotTrades.value = (tradesData.trades || []).reverse();
                 }
+                
+                // Refresh chart every 30 seconds automatically
+                const now = Date.now();
+                if (now - lastChartFetchTime > 30000) {
+                    chartTimestamp.value = now;
+                    lastChartFetchTime = now;
+                }
             } catch (err) {
                 console.error("Error fetching MA bot info:", err);
             }
@@ -556,6 +569,8 @@ const DashboardApp = {
             maBotStatus,
             maBotLogs,
             maBotTrades,
+            chartTimestamp,
+            refreshChart,
             fetchMaBotInfo,
             toggleMaBotPause
         };
