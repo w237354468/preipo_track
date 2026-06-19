@@ -142,7 +142,24 @@ def fetch_candles(inst_id, bar='30m', limit=100):
     try:
         res = requests.get(url, timeout=10).json()
         if res.get("code") == "0" and res.get("data"):
-            df def calculate_ema(series, period):
+            data = res["data"]
+            df = pd.DataFrame(data, columns=[
+                'ts', 'open', 'high', 'low', 'close', 'vol', 'volCcy', 'volCcyQuote', 'confirm'
+            ])
+            for col in ['open', 'high', 'low', 'close', 'vol']:
+                df[col] = df[col].astype(float)
+            df['ts'] = df['ts'].astype(int)
+            # Reverse to chronological order (oldest first)
+            df = df.iloc[::-1].reset_index(drop=True)
+            return df
+        else:
+            logger.error(f"Error fetching candles: {res}")
+            return None
+    except Exception as e:
+        logger.error(f"Request failed in fetch_candles: {e}")
+        return None
+
+def calculate_ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
 def calculate_rsi(series, period=14):
@@ -470,20 +487,6 @@ def main_loop():
         except Exception as ex:
             logger.error(f"Error in main loop: {ex}", exc_info=True)
             
-        time.sleep(60)
-
-if __name__ == "__main__":
-    try:
-        main_loop()
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user.")è Crossover signal on candle ts={current_candle_ts} but ALREADY ACTED - skipping (restart-safe)")
-            else:
-                logger.info("No crossover detected. Keeping current state.")
-                
-        except Exception as ex:
-            logger.error(f"Error in main loop: {ex}", exc_info=True)
-            
-        # Wait for 1 minute before checking again
         time.sleep(60)
 
 if __name__ == "__main__":
