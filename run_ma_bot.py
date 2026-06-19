@@ -143,6 +143,30 @@ def private_request(method: str, path: str, params: dict = None, json_data: dict
         logger.error(f"HTTP request failed: {e}")
         return None
 
+def get_instrument_details(inst_id: str) -> dict:
+    """Fetch ctVal and lotSz from OKX public instruments API."""
+    url = f"{BASE_URL}/api/v5/public/instruments?instType=SWAP&instId={inst_id}"
+    try:
+        res = requests.get(url, timeout=10).json()
+        if res.get("code") == "0" and res.get("data"):
+            data = res["data"][0]
+            return {
+                "ctVal": float(data.get("ctVal", 1.0)),
+                "lotSz": float(data.get("lotSz", 1.0))
+            }
+    except Exception as e:
+        logger.error(f"Failed to fetch instrument details for {inst_id}: {e}")
+    return {"ctVal": 1.0, "lotSz": 1.0}
+
+def format_size(size: float, lot_size: float) -> str:
+    """Format size to match the required lot size precision and remove trailing zeros if integer."""
+    if lot_size >= 1.0:
+        return str(int(round(size / lot_size) * lot_size))
+    else:
+        decimals = len(str(lot_size).split(".")[1]) if "." in str(lot_size) else 0
+        val = round(size / lot_size) * lot_size
+        return f"{val:.{decimals}f}"
+
 # Fetch candles
 def fetch_candles(inst_id, bar='30m', limit=100, max_retries=3):
     url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={limit}"
@@ -211,6 +235,11 @@ def main_loop():
     RSI_OS_EXIT = 25.0  # Oversold exit for short
     
     logger.info(f"Starting EMA+RSI Pullback Bot (30m) for {inst_id} on environment: {ENV_TYPE}")
+    
+    details = get_instrument_details(inst_id)
+    ct_val = details["ctVal"]
+    lot_sz = details["lotSz"]
+    logger.info(f"Loaded details for {inst_id}: ctVal={ct_val}, lotSz={lot_sz}")
     
     state = load_state()
     # Initialize stop_loss/take_profit if not present
@@ -349,9 +378,10 @@ def main_loop():
                 
             usable_margin = min(avail_balance, max_capital)
             target_value = usable_margin * leverage
-            target_sz = round(target_value / last_close, 3)
-            if target_sz < 0.001:
-                target_sz = 0.001
+            # Calculate target size in contracts (sz) using ct_val and align with lot_sz
+            raw_sz = target_value / (last_close * ct_val)
+            target_sz = max(raw_sz, lot_sz)
+            target_sz = round(target_sz / lot_sz) * lot_sz
                 
             # D. Exit / Risk Check
             exit_triggered = False
@@ -424,7 +454,7 @@ def main_loop():
                     order_data = {
                         "instId": inst_id, "tdMode": "isolated",
                         "side": close_side, "posSide": close_pos_side,
-                        "ordType": "market", "sz": str(pos_sz)
+                        "ordType": "market", "sz": format_size(pos_sz, lot_sz)
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Close response: {res}")
@@ -457,7 +487,7 @@ def main_loop():
                     order_data = {
                         "instId": inst_id, "tdMode": "isolated",
                         "side": "buy", "posSide": close_pos_side,
-                        "ordType": "market", "sz": str(pos_sz)
+                        "ordType": "market", "sz": format_size(pos_sz, lot_sz)
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Close Short response: {res}")
@@ -480,7 +510,7 @@ def main_loop():
                     order_data = {
                         "instId": inst_id, "tdMode": "isolated",
                         "side": "buy", "posSide": open_pos_side,
-                        "ordType": "market", "sz": str(target_sz)
+                        "ordType": "market", "sz": format_size(target_sz, lot_sz)
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Open Long response: {res}")
@@ -513,7 +543,7 @@ def main_loop():
                     order_data = {
                         "instId": inst_id, "tdMode": "isolated",
                         "side": "sell", "posSide": close_pos_side,
-                        "ordType": "market", "sz": str(pos_sz)
+                        "ordType": "market", "sz": format_size(pos_sz, lot_sz)
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Close Long response: {res}")
@@ -536,7 +566,7 @@ def main_loop():
                     order_data = {
                         "instId": inst_id, "tdMode": "isolated",
                         "side": "sell", "posSide": open_pos_side,
-                        "ordType": "market", "sz": str(target_sz)
+                        "ordType": "market", "sz": format_size(target_sz, lot_sz)
                     }
                     res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
                     logger.info(f"Open Short response: {res}")

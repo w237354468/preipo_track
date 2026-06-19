@@ -393,8 +393,9 @@ async def websocket_endpoint(websocket: WebSocket):
         logger.warning(f"Failed to fetch initial funding assets via REST: {e}")
 
     # Connect to OKX WebSockets (Private and Public)
-    okx_ws_url = "wss://ws.okx.com:8443/ws/v5/private"
-    pub_ws_url = "wss://ws.okx.com:8443/ws/v5/public"
+    ws_domain = "wspap.okx.com:8443" if simulated else "ws.okx.com:8443"
+    okx_ws_url = f"wss://{ws_domain}/ws/v5/private"
+    pub_ws_url = f"wss://{ws_domain}/ws/v5/public"
     
     try:
         async with okx_ws.connect(okx_ws_url) as ows, okx_ws.connect(pub_ws_url) as pub_ws:
