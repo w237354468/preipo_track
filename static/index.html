@@ -387,79 +387,138 @@
                             </n-grid-item>
                         </n-grid>
                         
-                        <!-- Row 2: Current Position Card -->
-                        <n-card title="当前持仓 (EMA+RSI 独立仓位)" style="margin-bottom: 20px;">
-                            <template #header-extra><i class="fa-solid fa-crosshairs" style="color: var(--accent-blue); font-size: 16px;"></i></template>
-                            <div v-if="maBotStatus.position && maBotStatus.position.side !== 'flat'" class="cockpit-container">
-                                <!-- Direction visual -->
-                                <div class="cockpit-direction-card" :class="maBotStatus.position.side">
-                                    <div class="cockpit-direction-icon">
-                                        <i class="fa-solid" :class="maBotStatus.position.side === 'long' ? 'fa-circle-arrow-up' : 'fa-circle-arrow-down'"></i>
-                                    </div>
-                                    <n-tag :type="maBotStatus.position.side === 'long' ? 'success' : 'error'" size="large" style="font-weight: 700;">
-                                        {{ maBotStatus.position.side === 'long' ? '做多 LONG' : '做空 SHORT' }}
-                                    </n-tag>
-                                    <div style="color: var(--text-secondary); font-size: 10px; margin-top: 6px; font-family: monospace;">
-                                        杠杆: 3x | 数量: {{ maBotStatus.position.size }}
-                                    </div>
-                                </div>
-
-                                <!-- Financial Metrics -->
-                                <div class="cockpit-metrics">
-                                    <div class="metric-box">
-                                        <span class="metric-label">开仓价格</span>
-                                        <span class="metric-val crypto-numeric">$ {{ formatNumber(maBotStatus.position.avgPx) }}</span>
-                                    </div>
-                                    <div class="metric-box">
-                                        <span class="metric-label">当前价格</span>
-                                        <span class="metric-val crypto-numeric" style="color: var(--accent-blue);">$ {{ maBotStatus.price ? formatNumber(maBotStatus.price) : '--' }}</span>
-                                    </div>
-                                    <div class="metric-box">
-                                        <span class="metric-label">未实现盈亏</span>
-                                        <span class="metric-val pnl-text crypto-numeric" :style="{ color: maBotStatus.position.upl >= 0 ? 'var(--crypto-green)' : 'var(--crypto-red)' }">
-                                            {{ maBotStatus.position.upl >= 0 ? '+' : '' }}{{ formatUSD(maBotStatus.position.upl) }} <span style="font-size: 11px;">USDT</span>
-                                        </span>
-                                    </div>
-                                    <div class="metric-box">
-                                        <span class="metric-label">收益率</span>
-                                        <span class="metric-val pnl-text crypto-numeric" :style="{ color: maBotStatus.position.uplRatio >= 0 ? 'var(--crypto-green)' : 'var(--crypto-red)' }">
-                                            {{ maBotStatus.position.uplRatio >= 0 ? '+' : '' }}{{ maBotStatus.position.uplRatio.toFixed ? maBotStatus.position.uplRatio.toFixed(2) : maBotStatus.position.uplRatio }}%
-                                        </span>
-                                    </div>
-                                </div>
-
-                                <!-- Visual Risk / Profit and Loss Slider -->
-                                <div class="risk-bar-card">
-                                    <div style="font-size: 11px; font-weight:600; color: var(--text-secondary); display:flex; align-items:center; gap:6px;">
-                                        <i class="fa-solid fa-shield-halved" style="color:var(--accent-blue);"></i> 仓位风险与期望回报监控 (ATR 止损/止盈)
-                                    </div>
-                                    <div class="risk-bar-container">
-                                        <div class="risk-bar-labels">
-                                            <span class="sl-label">止损 $ {{ formatNumber(maBotStatus.position.stop_loss) }}</span>
-                                            <span class="entry-label">开仓 $ {{ formatNumber(maBotStatus.position.avgPx) }}</span>
-                                            <span class="tp-label">止盈 $ {{ formatNumber(maBotStatus.position.take_profit) }}</span>
+                        <!-- Row 2: Grid containing Position Cockpit and Strategy Signal Monitor -->
+                        <n-grid :cols="24" :x-gap="20" style="margin-bottom: 20px;">
+                            <n-grid-item :span="14">
+                                <n-card title="当前持仓 (EMA+RSI 独立仓位)" style="height: 100%;">
+                                    <template #header-extra><i class="fa-solid fa-crosshairs" style="color: var(--accent-blue); font-size: 16px;"></i></template>
+                                    <div v-if="maBotStatus.position && maBotStatus.position.side !== 'flat'" class="cockpit-container" style="display: grid; grid-template-columns: 1fr 1.2fr; gap: 15px; align-items: center;">
+                                        <!-- Direction visual and metrics -->
+                                        <div>
+                                            <div style="display:flex; align-items:center; gap: 12px; margin-bottom: 12px;">
+                                                <n-tag :type="maBotStatus.position.side === 'long' ? 'success' : 'error'" size="large" style="font-weight: 700;">
+                                                    {{ maBotStatus.position.side === 'long' ? '做多 LONG' : '做空 SHORT' }}
+                                                </n-tag>
+                                                <span style="color: var(--text-secondary); font-size: 10px; font-family: monospace;">
+                                                    3x | 数量: {{ maBotStatus.position.size }}
+                                                </span>
+                                            </div>
+                                            <div class="cockpit-metrics" style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                                                <div class="metric-box">
+                                                    <span class="metric-label" style="font-size: 9px;">开仓价格</span>
+                                                    <span class="metric-val crypto-numeric" style="font-size: 14px;">$ {{ formatNumber(maBotStatus.position.avgPx) }}</span>
+                                                </div>
+                                                <div class="metric-box">
+                                                    <span class="metric-label" style="font-size: 9px;">当前价格</span>
+                                                    <span class="metric-val crypto-numeric" style="font-size: 14px; color: var(--accent-blue);">$ {{ maBotStatus.price ? formatNumber(maBotStatus.price) : '--' }}</span>
+                                                </div>
+                                                <div class="metric-box">
+                                                    <span class="metric-label" style="font-size: 9px;">未实现盈亏</span>
+                                                    <span class="metric-val pnl-text crypto-numeric" style="font-size: 14px;" :style="{ color: maBotStatus.position.upl >= 0 ? 'var(--crypto-green)' : 'var(--crypto-red)' }">
+                                                        {{ maBotStatus.position.upl >= 0 ? '+' : '' }}{{ formatUSD(maBotStatus.position.upl) }}
+                                                    </span>
+                                                </div>
+                                                <div class="metric-box">
+                                                    <span class="metric-label" style="font-size: 9px;">收益率</span>
+                                                    <span class="metric-val pnl-text crypto-numeric" style="font-size: 14px;" :style="{ color: maBotStatus.position.uplRatio >= 0 ? 'var(--crypto-green)' : 'var(--crypto-red)' }">
+                                                        {{ maBotStatus.position.uplRatio >= 0 ? '+' : '' }}{{ maBotStatus.position.uplRatio.toFixed ? maBotStatus.position.uplRatio.toFixed(2) : maBotStatus.position.uplRatio }}%
+                                                    </span>
+                                                </div>
+                                            </div>
                                         </div>
-                                        <div class="risk-bar-track">
-                                            <!-- The red loss zone: from SL to Entry -->
-                                            <div class="risk-zone-loss" :style="{ width: getPositionEntryProgress(maBotStatus.position) + '%' }"></div>
-                                            <!-- The green profit zone: from Entry to TP -->
-                                            <div class="risk-zone-profit" :style="{ left: getPositionEntryProgress(maBotStatus.position) + '%', width: (100 - getPositionEntryProgress(maBotStatus.position)) + '%' }"></div>
-                                            <!-- Current price marker -->
-                                            <div class="current-price-marker" :style="{ left: getPositionProgress(maBotStatus.position) + '%' }">
-                                                <span class="marker-tooltip">现价 $ {{ formatNumber(maBotStatus.price) }}</span>
+                                        
+                                        <!-- Visual Risk Bar -->
+                                        <div class="risk-bar-card" style="padding: 12px; height: 100%;">
+                                            <div style="font-size: 10px; font-weight:600; color: var(--text-secondary); display:flex; align-items:center; gap:4px; margin-bottom: 4px;">
+                                                <i class="fa-solid fa-shield-halved" style="color:var(--accent-blue);"></i> 止损/止盈风险监控
+                                            </div>
+                                            <div class="risk-bar-container" style="padding-bottom: 15px;">
+                                                <div class="risk-bar-labels" style="font-size: 8.5px; margin-bottom: 4px;">
+                                                    <span class="sl-label">${{ formatNumber(maBotStatus.position.stop_loss) }}</span>
+                                                    <span class="tp-label">${{ formatNumber(maBotStatus.position.take_profit) }}</span>
+                                                </div>
+                                                <div class="risk-bar-track" style="height: 4px;">
+                                                    <div class="risk-zone-loss" :style="{ width: getPositionEntryProgress(maBotStatus.position) + '%' }"></div>
+                                                    <div class="risk-zone-profit" :style="{ left: getPositionEntryProgress(maBotStatus.position) + '%', width: (100 - getPositionEntryProgress(maBotStatus.position)) + '%' }"></div>
+                                                    <div class="current-price-marker" :style="{ left: getPositionProgress(maBotStatus.position) + '%' }" style="top: -6px; width: 14px; height: 14px;">
+                                                        <span class="marker-tooltip" style="bottom: -18px; font-size: 8px; padding: 1px 4px;">现价 ${{ formatNumber(maBotStatus.price) }}</span>
+                                                    </div>
+                                                </div>
                                             </div>
                                         </div>
                                     </div>
-                                </div>
-                            </div>
-                            <div v-else style="text-align: center; color: var(--text-muted); padding: 40px 0; display:flex; flex-direction:column; align-items:center; gap:12px;">
-                                <i class="fa-solid fa-ghost" style="font-size: 32px; opacity: 0.3; animation: floatUpDown 2.5s infinite ease-in-out;"></i>
-                                <div style="font-size: 13px; font-weight:500;">当前无活跃仓位</div>
-                                <div style="font-size: 11px; color:var(--text-muted); max-width:400px; line-height:1.6;">
-                                    实盘机器人正在持续监控 30m K线。当 EMA(200) 指示大趋势，且 RSI(14) 回调进入触发区间（多单 35-45，空单 55-65）时，将自动开仓并设立 ATR 止损止盈。
-                                </div>
-                            </div>
-                        </n-card>
+                                    <div v-else style="text-align: center; color: var(--text-muted); padding: 30px 0; display:flex; flex-direction:column; align-items:center; gap:8px;">
+                                        <i class="fa-solid fa-ghost" style="font-size: 28px; opacity: 0.3; animation: floatUpDown 2.5s infinite ease-in-out;"></i>
+                                        <div style="font-size: 12px; font-weight:500;">当前无活跃仓位</div>
+                                        <div style="font-size: 10px; color:var(--text-muted); max-width:350px; line-height:1.4;">
+                                            等待 EMA+RSI 触发信号开仓。
+                                        </div>
+                                    </div>
+                                </n-card>
+                            </n-grid-item>
+
+                            <!-- Column 2: Strategy Signal Monitor Card -->
+                            <n-grid-item :span="10">
+                                <n-card title="策略信号触发监控 (EMA+RSI)" style="height: 100%;">
+                                    <template #header-extra><i class="fa-solid fa-compass" style="color: var(--accent-purple); font-size: 16px;"></i></template>
+                                    <div style="display:flex; flex-direction:column; gap:12px;">
+                                        
+                                        <!-- Trend direction status -->
+                                        <div style="display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.01); border: 1px solid rgba(255,255,255,0.02); padding: 8px 12px; border-radius: 8px;">
+                                            <span style="font-size: 12px; color: var(--text-secondary);">① 趋势过滤 (EMA 200)</span>
+                                            <n-tag v-if="maBotStatus.price && maBotStatus.fast_ma" :type="maBotStatus.price > maBotStatus.fast_ma ? 'success' : 'error'" size="small" style="font-weight:700;">
+                                                {{ maBotStatus.price > maBotStatus.fast_ma ? '做多趋势 (LONG ONLY)' : '做空趋势 (SHORT ONLY)' }}
+                                            </n-tag>
+                                            <span v-else style="color:var(--text-muted); font-size:11px;">加载中...</span>
+                                        </div>
+                                        
+                                        <!-- Price vs EMA 200 -->
+                                        <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-secondary); padding: 0 4px;">
+                                            <span>现价: <strong class="crypto-numeric" style="color:#fff;">${{ formatNumber(maBotStatus.price) }}</strong></span>
+                                            <span>EMA(200): <strong class="crypto-numeric" style="color:#fff;">${{ formatNumber(maBotStatus.fast_ma) }}</strong></span>
+                                        </div>
+
+                                        <n-divider style="margin: 4px 0;" />
+
+                                        <!-- RSI Pullback Entry Trigger status -->
+                                        <div>
+                                            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 6px;">
+                                                <span style="font-size: 12px; color: var(--text-secondary);">② 回调开仓触发 (RSI 14)</span>
+                                                <n-tag v-if="maBotStatus.price && maBotStatus.fast_ma && maBotStatus.slow_ma" 
+                                                       :type="((maBotStatus.price > maBotStatus.fast_ma && maBotStatus.slow_ma >= 35 && maBotStatus.slow_ma <= 45) || (maBotStatus.price < maBotStatus.fast_ma && maBotStatus.slow_ma >= 55 && maBotStatus.slow_ma <= 65)) ? 'success' : 'warning'"
+                                                       size="small" style="font-weight:700;">
+                                                    {{ ((maBotStatus.price > maBotStatus.fast_ma && maBotStatus.slow_ma >= 35 && maBotStatus.slow_ma <= 45) || (maBotStatus.price < maBotStatus.fast_ma && maBotStatus.slow_ma >= 55 && maBotStatus.slow_ma <= 65)) ? '满足开仓条件' : '等待回调区间' }}
+                                                </n-tag>
+                                                <span v-else style="color:var(--text-muted); font-size:11px;">加载中...</span>
+                                            </div>
+                                            
+                                            <!-- Target vs Current RSI -->
+                                            <div style="display:flex; justify-content:space-between; font-size:11px; color:var(--text-secondary); padding: 0 4px; margin-bottom: 4px;">
+                                                <span>目标 RSI: 
+                                                    <strong style="color:var(--crypto-green);" v-if="maBotStatus.price > maBotStatus.fast_ma">35.0 - 45.0 (多单)</strong>
+                                                    <strong style="color:var(--crypto-red);" v-else>55.0 - 65.0 (空单)</strong>
+                                                </span>
+                                                <span>当前 RSI(14): <strong class="crypto-numeric" style="color:#fff;">{{ maBotStatus.slow_ma ? maBotStatus.slow_ma.toFixed(2) : '--' }}</strong></span>
+                                            </div>
+                                        </div>
+
+                                        <!-- If position is active, show exit condition monitors -->
+                                        <div v-if="maBotStatus.position && maBotStatus.position.side !== 'flat'" style="background:rgba(255,23,68,0.02); border:1px dashed rgba(255,23,68,0.1); padding: 8px; border-radius: 8px; font-size: 11px; margin-top: 2px;">
+                                            <div style="font-weight:600; color:var(--crypto-red); margin-bottom:4px;"><i class="fa-solid fa-bell"></i> 离场条件监测：</div>
+                                            <div style="display:flex; justify-content:space-between; color:var(--text-secondary); margin-bottom:2px;">
+                                                <span>RSI 极端平仓线:</span>
+                                                <span style="color:#fff;">{{ maBotStatus.position.side === 'long' ? '> 75.0 (超买)' : '< 25.0 (超卖)' }}</span>
+                                            </div>
+                                            <div style="display:flex; justify-content:space-between; color:var(--text-secondary);">
+                                                <span>趋势反向平仓线:</span>
+                                                <span style="color:#fff;">价格 {{ maBotStatus.position.side === 'long' ? '<' : '>' }} EMA(200)</span>
+                                            </div>
+                                        </div>
+
+                                    </div>
+                                </n-card>
+                            </n-grid-item>
+                        </n-grid>
                         
                         <!-- Row 3: Trade History Table -->
                         <n-card title="交易记录" style="margin-bottom: 20px;">
