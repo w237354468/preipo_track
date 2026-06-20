@@ -1106,6 +1106,116 @@ async def get_ma_bot_chart():
         logger.error(f"Error generating chart: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+@app.get("/api/openai-bot/chart")
+async def get_openai_bot_chart():
+    """
+    Generates and returns a real-time chart of the EMA+RSI pullback strategy for OPENAI.
+    """
+    try:
+        inst_id = "OPENAI-USDT-SWAP"
+        loop = asyncio.get_event_loop()
+        base_url = "https://www.okx.com"
+        path = f"/api/v5/market/candles?instId={inst_id}&bar=30m&limit=250"
+        
+        def fetch():
+            headers = {"User-Agent": "Mozilla/5.0"}
+            return requests.get(base_url + path, headers=headers, timeout=5).json()
+            
+        res = await loop.run_in_executor(None, fetch)
+        if res.get("code") != "0" or not res.get("data"):
+            raise HTTPException(status_code=500, detail="Failed to fetch market data from OKX")
+            
+        df = pd.DataFrame(res["data"], columns=[
+            'ts', 'open', 'high', 'low', 'close', 'vol', 'volCcy', 'volCcyQuote', 'confirm'
+        ])
+        for col in ['open', 'high', 'low', 'close', 'vol']:
+            df[col] = df[col].astype(float)
+        df['ts'] = df['ts'].astype(int)
+        df = df.iloc[::-1].reset_index(drop=True)
+        
+        # Indicators
+        df['ema'] = df['close'].ewm(span=200, adjust=False).mean()
+        
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
+        loss = -delta.where(delta < 0, 0).ewm(alpha=1/14, adjust=False).mean()
+        rs = gain / loss
+        df['rsi'] = 100 - (100 / (1 + rs))
+        
+        # Detect historical signals
+        long_signals = []
+        short_signals = []
+        for i in range(1, len(df)):
+            prev = df.iloc[i-1]
+            curr = df.iloc[i]
+            if pd.isna(prev['ema']) or pd.isna(prev['rsi']):
+                continue
+            long_trigger = (prev['close'] > prev['ema']) and (35.0 <= prev['rsi'] <= 45.0)
+            short_trigger = (prev['close'] < prev['ema']) and (55.0 <= prev['rsi'] <= 65.0)
+            if long_trigger:
+                long_signals.append((i, curr['close']))
+            if short_trigger:
+                short_signals.append((i, curr['close']))
+                
+        # Draw plot
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6), sharex=True, gridspec_kw={'height_ratios': [2, 1]})
+        plt.style.use('dark_background')
+        fig.patch.set_facecolor('#0f141c')
+        ax1.set_facecolor('#0f141c')
+        ax2.set_facecolor('#0f141c')
+        
+        times = [datetime.fromtimestamp(ts / 1000) for ts in df['ts']]
+        
+        # Ax1
+        ax1.plot(times, df['close'], color='#4da2ff', label='Price', linewidth=1.5)
+        ax1.plot(times, df['ema'], color='#ff9f43', label='EMA 200', linewidth=1.2, linestyle='--')
+        
+        if long_signals:
+            l_idx, l_px = zip(*long_signals)
+            l_times = [times[idx] for idx in l_idx]
+            ax1.scatter(l_times, l_px, color='#28c76f', marker='^', s=80, label='Long Entry', zorder=5)
+        if short_signals:
+            s_idx, s_px = zip(*short_signals)
+            s_times = [times[idx] for idx in s_idx]
+            ax1.scatter(s_times, s_px, color='#ea5455', marker='v', s=80, label='Short Entry', zorder=5)
+            
+        current_time = times[-1]
+        current_px = df['close'].iloc[-1]
+        ax1.scatter(current_time, current_px, color='#a855f7', s=60, label=f'Current: {current_px:.2f}', zorder=6)
+        
+        ax1.set_title('OPENAI-USDT-SWAP 30m - EMA+RSI Pullback', color='#ffffff', fontsize=12, fontweight='bold')
+        ax1.set_ylabel('Price', color='#a0aec0')
+        ax1.grid(True, color='#2d3748', linestyle=':', alpha=0.5)
+        ax1.legend(loc='upper left', facecolor='#161d2b', edgecolor='#2d3748', fontsize=8)
+        
+        # Ax2
+        ax2.plot(times, df['rsi'], color='#a855f7', label=f'RSI (Current: {df["rsi"].iloc[-1]:.2f})', linewidth=1.2)
+        ax2.axhline(45, color='#28c76f', linestyle=':', alpha=0.5)
+        ax2.axhline(35, color='#28c76f', linestyle=':', alpha=0.5)
+        ax2.fill_between(times, 35, 45, color='#28c76f', alpha=0.1)
+        ax2.axhline(65, color='#ea5455', linestyle=':', alpha=0.5)
+        ax2.axhline(55, color='#ea5455', linestyle=':', alpha=0.5)
+        ax2.fill_between(times, 55, 65, color='#ea5455', alpha=0.1)
+        ax2.axhline(75, color='#ff9f43', linestyle='-.', alpha=0.3)
+        ax2.axhline(25, color='#ff9f43', linestyle='-.', alpha=0.3)
+        
+        ax2.set_ylabel('RSI', color='#a0aec0')
+        ax2.set_ylim(10, 90)
+        ax2.grid(True, color='#2d3748', linestyle=':', alpha=0.5)
+        ax2.legend(loc='upper left', facecolor='#161d2b', edgecolor='#2d3748', fontsize=8)
+        
+        fig.autofmt_xdate()
+        
+        buf = io.BytesIO()
+        plt.savefig(buf, format='png', dpi=120, bbox_inches='tight', facecolor='#0f141c')
+        buf.seek(0)
+        plt.close(fig)
+        
+        return StreamingResponse(buf, media_type="image/png")
+    except Exception as e:
+        logger.error(f"Error generating OPENAI chart: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
 # Startup block
 
 if __name__ == "__main__":

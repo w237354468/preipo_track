@@ -53,6 +53,11 @@ const DashboardApp = {
             lastChartFetchTime = Date.now();
         };
         
+        const openaiChartTimestamp = ref(Date.now());
+        const refreshOpenaiChart = () => {
+            openaiChartTimestamp.value = Date.now();
+        };
+        
         // Modal states
         const showPasswordModal = ref(false);
         const passwordForm = reactive({
@@ -571,6 +576,8 @@ const DashboardApp = {
             maBotTrades,
             chartTimestamp,
             refreshChart,
+            openaiChartTimestamp,
+            refreshOpenaiChart,
             apiBase,
             fetchMaBotInfo,
             toggleMaBotPause
