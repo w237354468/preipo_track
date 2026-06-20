@@ -1,15 +1,15 @@
 import os
 import sys
 import time
-import hmac
-import base64
 import json
 import logging
+import asyncio
 from logging.handlers import RotatingFileHandler
 from datetime import datetime, timezone
-import requests
 import pandas as pd
 import numpy as np
+import ccxt.async_support as ccxt_async
+import websockets
 
 # Setup logging
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -30,7 +30,7 @@ def load_dotenv():
     script_dir = os.path.dirname(os.path.abspath(__file__))
     dotenv_path = os.path.join(script_dir, ".env")
     if os.path.exists(dotenv_path):
-        logger.info("Loading environment variables...")
+        logger.info("Loading environment variables from .env...")
         with open(dotenv_path, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
@@ -51,17 +51,23 @@ if not API_KEY or not SECRET_KEY or not PASSPHRASE:
     sys.exit(1)
 
 SIMULATED = (ENV_TYPE == "demo")
-BASE_URL = "https://www.okx.com"
-
 STATE_FILE = os.path.join(SCRIPT_DIR, "ma_bot_state.json")
 TRADES_FILE = os.path.join(SCRIPT_DIR, "ma_bot_trades.json")
 
 # ────────────────────────────────────────────────────────────
-# State persistence: prevents duplicate orders on restart
+# State persistence and Trade log
 # ────────────────────────────────────────────────────────────
 def load_state():
-    """Load bot state from disk. Returns dict with last_acted_ts, last_signal, etc."""
-    default = {"last_acted_ts": 0, "last_signal": "none", "position_side": "flat", "peak_upl_ratio": 0.0, "position_size": 0.0, "tp_order_id": ""}
+    default = {
+        "last_acted_ts": 0, 
+        "last_signal": "none", 
+        "position_side": "flat", 
+        "position_size": 0.0, 
+        "stop_loss": 0.0, 
+        "take_profit": 0.0,
+        "tp_order_id": "",
+        "is_paused": False
+    }
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r") as f:
@@ -72,7 +78,6 @@ def load_state():
     return default
 
 def save_state(state: dict):
-    """Persist bot state to disk atomically."""
     try:
         tmp_file = STATE_FILE + ".tmp"
         with open(tmp_file, "w") as f:
@@ -82,7 +87,6 @@ def save_state(state: dict):
         logger.warning(f"Failed to save state file atomically: {e}")
 
 def record_trade(trade_info: dict):
-    """Append a trade record to the trades JSON file (atomic write)."""
     trades = []
     if os.path.exists(TRADES_FILE):
         try:
@@ -91,8 +95,7 @@ def record_trade(trade_info: dict):
         except Exception:
             trades = []
     trades.append(trade_info)
-    # Keep last 200 trades
-    trades = trades[-200:]
+    trades = trades[-200:]  # Keep last 200 trades
     try:
         tmp_file = TRADES_FILE + ".tmp"
         with open(tmp_file, "w") as f:
@@ -101,106 +104,9 @@ def record_trade(trade_info: dict):
     except Exception as e:
         logger.warning(f"Failed to save trades file: {e}")
 
-
 # ────────────────────────────────────────────────────────────
-# OKX API helpers
+# Indicator calculations (Pandas compatible)
 # ────────────────────────────────────────────────────────────
-def get_okx_headers(method: str, request_path: str, body: str = "") -> dict:
-    now = datetime.now(timezone.utc)
-    timestamp = now.strftime('%Y-%m-%dT%H:%M:%S.%f')[:-3] + 'Z'
-    prehash = timestamp + method + request_path + body
-    mac = hmac.new(bytes(SECRET_KEY, encoding='utf8'), bytes(prehash, encoding='utf8'), digestmod='sha256')
-    signature = base64.b64encode(mac.digest()).decode('utf-8')
-    
-    headers = {
-        "Content-Type": "application/json",
-        "OK-ACCESS-KEY": API_KEY,
-        "OK-ACCESS-SIGN": signature,
-        "OK-ACCESS-TIMESTAMP": timestamp,
-        "OK-ACCESS-PASSPHRASE": PASSPHRASE,
-    }
-    if SIMULATED:
-        headers["x-simulated-only"] = "1"
-    return headers
-
-def private_request(method: str, path: str, params: dict = None, json_data: dict = None):
-    url = BASE_URL + path
-    body = ""
-    if json_data:
-        body = json.dumps(json_data)
-        
-    request_path = path
-    if method == "GET" and params:
-        from urllib.parse import urlencode
-        # Sort or encode the params to construct the exact query string OKX expects
-        query_string = urlencode(params)
-        request_path = f"{path}?{query_string}"
-        
-    headers = get_okx_headers(method, request_path, body)
-    
-    try:
-        if method == "GET":
-            res = requests.get(url, headers=headers, params=params, timeout=10)
-        elif method == "POST":
-            res = requests.post(url, headers=headers, data=body, timeout=10)
-        else:
-            return None
-        return res.json()
-    except Exception as e:
-        logger.error(f"HTTP request failed: {e}")
-        return None
-
-def get_instrument_details(inst_id: str) -> dict:
-    """Fetch ctVal and lotSz from OKX public instruments API."""
-    url = f"{BASE_URL}/api/v5/public/instruments?instType=SWAP&instId={inst_id}"
-    try:
-        res = requests.get(url, timeout=10).json()
-        if res.get("code") == "0" and res.get("data"):
-            data = res["data"][0]
-            return {
-                "ctVal": float(data.get("ctVal", 1.0)),
-                "lotSz": float(data.get("lotSz", 1.0))
-            }
-    except Exception as e:
-        logger.error(f"Failed to fetch instrument details for {inst_id}: {e}")
-    return {"ctVal": 1.0, "lotSz": 1.0}
-
-def format_size(size: float, lot_size: float) -> str:
-    """Format size to match the required lot size precision and remove trailing zeros if integer."""
-    if lot_size >= 1.0:
-        return str(int(round(size / lot_size) * lot_size))
-    else:
-        decimals = len(str(lot_size).split(".")[1]) if "." in str(lot_size) else 0
-        val = round(size / lot_size) * lot_size
-        return f"{val:.{decimals}f}"
-
-# Fetch candles
-def fetch_candles(inst_id, bar='30m', limit=100, max_retries=3):
-    url = f"{BASE_URL}/api/v5/market/candles?instId={inst_id}&bar={bar}&limit={limit}"
-    for attempt in range(1, max_retries + 1):
-        try:
-            res = requests.get(url, timeout=10).json()
-            if res.get("code") == "0" and res.get("data"):
-                data = res["data"]
-                df = pd.DataFrame(data, columns=[
-                    'ts', 'open', 'high', 'low', 'close', 'vol', 'volCcy', 'volCcyQuote', 'confirm'
-                ])
-                for col in ['open', 'high', 'low', 'close', 'vol']:
-                    df[col] = df[col].astype(float)
-                df['ts'] = df['ts'].astype(int)
-                # Reverse to chronological order (oldest first)
-                df = df.iloc[::-1].reset_index(drop=True)
-                return df
-            else:
-                logger.error(f"Attempt {attempt}/{max_retries} - Error fetching candles: {res}")
-        except Exception as e:
-            logger.error(f"Attempt {attempt}/{max_retries} - Request failed in fetch_candles: {e}")
-        
-        if attempt < max_retries:
-            time.sleep(attempt * 2)
-            
-    return None
-
 def calculate_ema(series, period):
     return series.ewm(span=period, adjust=False).mean()
 
@@ -221,8 +127,175 @@ def calculate_atr(df, period=14):
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     return tr.ewm(alpha=1/period, adjust=False).mean()
 
-def main_loop():
-    inst_id = "ANTHROPIC-USDT-SWAP"
+def format_size(size: float, lot_size: float) -> str:
+    if lot_size >= 1.0:
+        return str(int(round(size / lot_size) * lot_size))
+    else:
+        decimals = len(str(lot_size).split(".")[1]) if "." in str(lot_size) else 0
+        val = round(size / lot_size) * lot_size
+        return f"{val:.{decimals}f}"
+
+# ────────────────────────────────────────────────────────────
+# Global Context and Locks
+# ────────────────────────────────────────────────────────────
+class BotContext:
+    def __init__(self):
+        self.last_close = 0.0
+        self.pos_side = "flat"
+        self.pos_sz = 0.0
+        self.pos_avg_px = 0.0
+        self.stop_loss = 0.0
+        self.take_profit = 0.0
+        self.tp_order_id = ""
+        self.is_paused = False
+        self.last_acted_ts = 0
+        self.ct_val = 1.0
+        self.lot_sz = 1.0
+        self.ccxt_symbol = ""
+        self.pos_mode = "net_mode"
+
+context = BotContext()
+order_lock = asyncio.Lock()  # Prevent concurrent ordering operations
+
+# ────────────────────────────────────────────────────────────
+# Core Order Execution Logic using CCXT (Thread & Asynchronous safe)
+# ────────────────────────────────────────────────────────────
+async def trigger_market_exit(exchange: ccxt_async.Exchange, inst_id: str, exit_reason: str):
+    """Executes a market close order safely with retries and TP order cancellation."""
+    async with order_lock:
+        # Load latest state to prevent duplicate close
+        state = load_state()
+        if state.get("position_side", "flat") == "flat":
+            return
+            
+        logger.info(f"⚡ EXIT TRIGGERED: {exit_reason} (Last Price: {context.last_close:.2f})")
+        close_side = "sell" if context.pos_side == "long" else "buy"
+        close_pos_side = context.pos_side if context.pos_mode == "long_short" else "net"
+        
+        # 1. Cancel resting TP order if exists
+        tp_order_id = state.get("tp_order_id")
+        if tp_order_id:
+            logger.info(f"Cancelling resting TP limit order: {tp_order_id}")
+            for attempt in range(3):
+                try:
+                    await exchange.cancel_order(id=tp_order_id, symbol=context.ccxt_symbol)
+                    logger.info("TP order cancelled successfully on exchange.")
+                    break
+                except ccxt_async.OrderNotFound:
+                    logger.info("TP order already filled or cancelled on exchange.")
+                    break
+                except Exception as e:
+                    logger.warning(f"Attempt {attempt+1}/3 to cancel TP order failed: {e}. Retrying...")
+                    await asyncio.sleep(0.5)
+            state["tp_order_id"] = ""
+            save_state(state)
+
+        # 2. Market close with retries
+        order_params = {
+            'reduceOnly': True,
+            'posSide': close_pos_side,
+            'tdMode': 'isolated'
+        }
+        
+        order_executed = False
+        close_res = None
+        for attempt in range(5):
+            try:
+                # CCXT Unified create_order
+                close_res = await exchange.create_order(
+                    symbol=context.ccxt_symbol,
+                    type='market',
+                    side=close_side,
+                    amount=context.pos_sz,
+                    price=None,
+                    params=order_params
+                )
+                logger.info(f"🎉 Close position order filled successfully on attempt {attempt+1}")
+                order_executed = True
+                break
+            except Exception as ex:
+                logger.error(f"❌ Attempt {attempt+1}/5 - Close order failed: {ex}. Retrying in 1s...")
+                await asyncio.sleep(1)
+                
+        if order_executed:
+            record_trade({
+                "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                "action": f"CLOSE_{context.pos_side.upper()}",
+                "size": context.pos_sz, 
+                "price": context.last_close, 
+                "reason": exit_reason, 
+                "response": str(close_res)
+            })
+            state["position_side"] = "flat"
+            state["stop_loss"] = 0.0
+            state["take_profit"] = 0.0
+            state["position_size"] = 0.0
+            state["last_signal"] = exit_reason.lower()
+            save_state(state)
+            
+            # Sync context
+            context.pos_side = "flat"
+            context.pos_sz = 0.0
+            context.stop_loss = 0.0
+            context.take_profit = 0.0
+            context.tp_order_id = ""
+        else:
+            logger.critical(f"🚨 CRITICAL: Failed to execute close order on OKX after 5 attempts! Reason: {exit_reason}")
+
+# ────────────────────────────────────────────────────────────
+# WebSocket Live Price Listener (Millisecond Response for SL)
+# ────────────────────────────────────────────────────────────
+async def websocket_listener(inst_id: str):
+    """Subscribes to live tickers and runs real-time stop-loss checking."""
+    ws_url = "wss://wspap.okx.com:8443/ws/v5/public" if SIMULATED else "wss://ws.okx.com:8443/ws/v5/public"
+    logger.info(f"Starting live WebSocket price listener on: {ws_url}")
+    
+    # Establish connection with auto-reconnect
+    async for websocket in websockets.connect(ws_url):
+        try:
+            # Subscribe to tickers channel
+            subscribe_msg = {
+                "op": "subscribe",
+                "args": [{
+                    "channel": "tickers",
+                    "instId": inst_id
+                }]
+            }
+            await websocket.send(json.dumps(subscribe_msg))
+            logger.info(f"Subscribed to tickers channel for {inst_id}")
+            
+            while True:
+                response = await websocket.recv()
+                data = json.loads(response)
+                
+                if "data" in data:
+                    ticker = data["data"][0]
+                    last_price = float(ticker["last"])
+                    context.last_close = last_price
+                    
+                    # Real-time hard Stop Loss checking
+                    if context.pos_side != "flat" and context.pos_sz > 0:
+                        if context.pos_side == "long" and context.stop_loss > 0.0:
+                            if last_price <= context.stop_loss:
+                                # We need an async reference to exchange, we will use it from our main task
+                                # This will run exit triggered instantly
+                                asyncio.create_task(trigger_market_exit(global_exchange, inst_id, "STOP_LOSS_ATR_WS"))
+                                
+                        elif context.pos_side == "short" and context.stop_loss > 0.0:
+                            if last_price >= context.stop_loss:
+                                asyncio.create_task(trigger_market_exit(global_exchange, inst_id, "STOP_LOSS_ATR_WS"))
+                                
+        except websockets.ConnectionClosed:
+            logger.warning("WebSocket connection lost! Reconnecting in 5 seconds...")
+            await asyncio.sleep(5)
+        except Exception as e:
+            logger.error(f"WebSocket listener encountered error: {e}")
+            await asyncio.sleep(2)
+
+# ────────────────────────────────────────────────────────────
+# Main Asynchronous Polling Decision Loop
+# ────────────────────────────────────────────────────────────
+async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
     max_capital = 10.0  # Total capital limit: 10 USDT
     leverage = 3        # 3x leverage
     
@@ -238,64 +311,46 @@ def main_loop():
     RSI_SHORT_LOWER = 55.0
     RSI_SHORT_UPPER = 65.0
     
-    RSI_OB_EXIT = 75.0  # Overbought exit for long
-    RSI_OS_EXIT = 25.0  # Oversold exit for short
-    
-    logger.info(f"Starting EMA+RSI Pullback Bot (30m) for {inst_id} on environment: {ENV_TYPE}")
-    
-    details = get_instrument_details(inst_id)
-    ct_val = details["ctVal"]
-    lot_sz = details["lotSz"]
-    logger.info(f"Loaded details for {inst_id}: ctVal={ct_val}, lotSz={lot_sz}")
-    
-    state = load_state()
-    # Initialize stop_loss/take_profit if not present
-    if "stop_loss" not in state:
-        state["stop_loss"] = 0.0
-    if "take_profit" not in state:
-        state["take_profit"] = 0.0
-    
-    # Check position mode
-    config_res = private_request("GET", "/api/v5/account/config")
-    pos_mode = "net_mode"
-    if config_res and config_res.get("code") == "0" and config_res.get("data"):
-        pos_mode = config_res["data"][0].get("posMode", "long_short")
-        logger.info(f"Current Position Mode on OKX: {pos_mode}")
-        
-    # Set Leverage to 3x
-    lev_res = private_request("POST", "/api/v5/account/set-leverage", json_data={
-        "instId": inst_id,
-        "lever": str(leverage),
-        "mgnMode": "isolated"
-    })
-    logger.info(f"Leverage setup response: {lev_res}")
+    RSI_OB_EXIT = 75.0
+    RSI_OS_EXIT = 25.0
     
     while True:
         try:
-            # Check if paused by user
+            # Check state
             state = load_state()
-            if state.get("is_paused", False):
+            context.is_paused = state.get("is_paused", False)
+            if context.is_paused:
                 logger.info("Bot is PAUSED by user. Sleeping for 10 seconds...")
-                time.sleep(10)
-                continue
-
-            # A. Fetch candles (at least 600 candles to compute EMA 200 accurately and avoid drift)
-            df = fetch_candles(inst_id, bar='30m', limit=600)
-            if df is None or len(df) < 220:
-                logger.warning("Not enough candles fetched, waiting...")
-                time.sleep(30)
+                await asyncio.sleep(10)
                 continue
                 
-            # Compute indicators on all candles
+            # 1. Fetch historical candles (600 candles for EMA accuracy)
+            try:
+                # CCXT fetch_ohlcv returns list of list [ts, open, high, low, close, volume] sorted chronologically
+                ohlcv = await exchange.fetch_ohlcv(symbol=context.ccxt_symbol, timeframe='30m', limit=600)
+            except Exception as e:
+                logger.error(f"Failed to fetch candles: {e}")
+                await asyncio.sleep(15)
+                continue
+                
+            if not ohlcv or len(ohlcv) < 220:
+                logger.warning("Not enough candles fetched, waiting...")
+                await asyncio.sleep(15)
+                continue
+                
+            df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'vol'])
+            # Indicators
             df['ema'] = calculate_ema(df['close'], period=EMA_PERIOD)
             df['rsi'] = calculate_rsi(df['close'], period=RSI_PERIOD)
             df['atr'] = calculate_atr(df, period=ATR_PERIOD)
             
-            # Use last completed candle (index -2) for entry checks to avoid signal flickering
             completed_candle = df.iloc[-2]
             current_candle = df.iloc[-1]
             
-            last_close = current_candle['close']
+            # Update last close if websocket is slow
+            if context.last_close == 0.0:
+                context.last_close = current_candle['close']
+                
             current_candle_ts = int(completed_candle['ts'])
             
             # Entry Signal Indicators (from completed candle)
@@ -304,91 +359,86 @@ def main_loop():
             comp_rsi = completed_candle['rsi']
             comp_atr = completed_candle['atr']
             
-            # Current values (for exit/monitoring)
+            # Current values
             curr_rsi = current_candle['rsi']
             curr_ema = current_candle['ema']
             
-            # Check for entry signals
+            # Signals checking
             long_entry_signal = (comp_close > comp_ema) and (RSI_LONG_LOWER <= comp_rsi <= RSI_LONG_UPPER)
             short_entry_signal = (comp_close < comp_ema) and (RSI_SHORT_LOWER <= comp_rsi <= RSI_SHORT_UPPER)
             
             logger.info(
-                f"Price: {last_close:.2f} | EMA(200): {curr_ema:.2f} | RSI(14): {curr_rsi:.2f} | "
-                f"Completed Candle (Close: {comp_close:.2f}, EMA: {comp_ema:.2f}, RSI: {comp_rsi:.2f}, ATR: {comp_atr:.4f}) | "
+                f"Price: {context.last_close:.2f} | EMA(200): {curr_ema:.2f} | RSI(14): {curr_rsi:.2f} | "
+                f"Completed (Close: {comp_close:.2f}, EMA: {comp_ema:.2f}, RSI: {comp_rsi:.2f}, ATR: {comp_atr:.4f}) | "
                 f"Signals: Long={long_entry_signal}, Short={short_entry_signal}"
             )
             
-            # B. Get current positions
-            pos_res = private_request("GET", "/api/v5/account/positions")
+            # 2. Sync position status from Exchange
+            try:
+                positions = await exchange.fetch_positions(symbols=[context.ccxt_symbol])
+            except Exception as e:
+                logger.error(f"Failed to fetch positions from OKX: {e}")
+                await asyncio.sleep(10)
+                continue
+                
             pos_side = "flat"
             pos_sz = 0.0
             pos_avg_px = 0.0
             pos_upl = 0.0
             pos_upl_ratio = 0.0
-            pos_margin = 0.0
-            pos_liq_px = 0.0
             
-            if pos_res and pos_res.get("code") == "0":
-                data = pos_res.get("data", [])
-                for p in data:
-                    if p.get("instId") == inst_id and p.get("mgnMode") == "isolated":
-                        p_sz = float(p.get("pos", "0") or "0")
-                        p_side = p.get("posSide")
-                        
-                        if p_side == "long" and p_sz > 0:
-                            pos_side = "long"
-                            pos_sz = p_sz
-                        elif p_side == "short" and p_sz > 0:
-                            pos_side = "short"
-                            pos_sz = p_sz
-                        elif p_side == "net":
-                            if p_sz > 0:
-                                pos_side = "long"
-                                pos_sz = p_sz
-                            elif p_sz < 0:
-                                pos_side = "short"
-                                pos_sz = abs(p_sz)
-
-                        if pos_side != "flat":
-                            pos_avg_px = float(p.get("avgPx", "0") or "0")
-                            pos_upl = float(p.get("upl", "0") or "0")
-                            pos_upl_ratio = float(p.get("uplRatio", "0") or "0") * 100
-                            pos_margin = float(p.get("margin", "0") or "0")
-                            pos_liq_px = float(p.get("liqPx", "0") or "0")
-            else:
-                logger.error(f"Failed to fetch positions from OKX: {pos_res}")
+            for p in positions:
+                p_sz = float(p.get("contracts", 0.0))
+                p_side = p.get("side")
                 
+                # isolated margin check
+                if p.get("marginMode") == "isolated" and p_sz > 0:
+                    pos_side = p_side
+                    pos_sz = p_sz
+                    pos_avg_px = float(p.get("entryPrice", 0.0))
+                    pos_upl = float(p.get("unrealizedPnl", 0.0))
+                    # percentage
+                    pos_upl_ratio = float(p.get("percentage", 0.0))
+                    break
+                    
+            # Local state synchronization
+            context.pos_side = pos_side
+            context.pos_sz = pos_sz
+            context.pos_avg_px = pos_avg_px
+            
             # Sync: if exchange says flat but state thinks we have a position, reset state
             if pos_side == "flat" and state.get("position_side", "flat") != "flat":
-                logger.warning(f"⚠️ 交易所无持仓，但状态文件记录 position_side={state['position_side']}，同步重置为 flat...")
+                logger.warning(f"⚠️ Exchange flat, local state records position_side={state['position_side']}. Sync resetting...")
                 
-                # Check if it was closed via the resting TP order
+                # Check if it was closed via resting limit TP order
                 tp_order_id = state.get("tp_order_id", "")
                 was_tp_filled = False
                 if tp_order_id:
-                    logger.info(f"Checking status of resting TP order: {tp_order_id}")
-                    order_status_res = private_request("GET", "/api/v5/trade/order", params={"instId": inst_id, "ordId": tp_order_id})
-                    if order_status_res and order_status_res.get("code") == "0" and order_status_res.get("data"):
-                        ord_state = order_status_res["data"][0].get("state")
-                        if ord_state == "filled":
-                            logger.info(f"🎉 Confirming resting Limit TP order was filled on exchange!")
+                    try:
+                        ord_res = await exchange.fetch_order(id=tp_order_id, symbol=context.ccxt_symbol)
+                        if ord_res and ord_res.get("status") == "closed":
+                            logger.info("🎉 Confirming resting Limit TP order was filled on exchange!")
                             was_tp_filled = True
-                            
+                    except Exception as e:
+                        logger.warning(f"Failed to fetch TP order status: {e}")
+                        
                 if was_tp_filled:
                     record_trade({
                         "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
                         "action": f"CLOSE_{state['position_side'].upper()}",
                         "size": state.get("position_size", 0.0),
-                        "price": state.get("take_profit", last_close),
+                        "price": state.get("take_profit", context.last_close),
                         "reason": "TAKE_PROFIT_LIMIT",
                         "response": "Limit order filled"
                     })
                     state["last_signal"] = "take_profit_limit"
                 else:
-                    # Cancel TP order just in case it remains open (e.g. manual close or liquidation)
+                    # Cancel stale TP order on exchange
                     if tp_order_id:
-                        logger.info(f"Cancelling stale TP order on exchange: {tp_order_id}")
-                        private_request("POST", "/api/v5/trade/cancel-order", json_data={"instId": inst_id, "ordId": tp_order_id})
+                        try:
+                            await exchange.cancel_order(id=tp_order_id, symbol=context.ccxt_symbol)
+                        except Exception:
+                            pass
                     state["last_signal"] = "sync_reset"
                     
                 state["position_side"] = "flat"
@@ -397,84 +447,60 @@ def main_loop():
                 state["position_size"] = 0.0
                 state["tp_order_id"] = ""
                 save_state(state)
-            
+                
+                context.stop_loss = 0.0
+                context.take_profit = 0.0
+                context.tp_order_id = ""
+
+            # Update context SL/TP from state
+            if pos_side != "flat":
+                context.stop_loss = state.get("stop_loss", 0.0)
+                context.take_profit = state.get("take_profit", 0.0)
+                context.tp_order_id = state.get("tp_order_id", "")
+                
             logger.info(
                 f"Position: side={pos_side} | size={pos_sz} | avgPx={pos_avg_px:.2f} | "
-                f"upl={pos_upl:.4f} | uplRatio={pos_upl_ratio:.2f}% | SL={state.get('stop_loss', 0.0):.2f} | TP={state.get('take_profit', 0.0):.2f}"
+                f"upl={pos_upl:.4f} | uplRatio={pos_upl_ratio:.2f}% | SL={context.stop_loss:.2f} | TP={context.take_profit:.2f}"
             )
-            
-            # C. Get available balance
-            avail_balance = 0.0
-            bal_res = private_request("GET", "/api/v5/account/balance")
-            if bal_res and bal_res.get("code") == "0" and bal_res.get("data"):
-                for detail in bal_res["data"][0].get("details", []):
-                    if detail.get("ccy") == "USDT":
-                        avail_balance = float(detail.get("availBal", "0"))
-                        break
-            else:
-                logger.error(f"Failed to fetch balance from OKX: {bal_res}")
-                
-            usable_margin = min(avail_balance, max_capital)
-            target_value = usable_margin * leverage
-            # Calculate target size in contracts (sz) using ct_val and align with lot_sz
-            raw_sz = target_value / (last_close * ct_val)
-            target_sz = max(raw_sz, lot_sz)
-            target_sz = round(target_sz / lot_sz) * lot_sz
-                
-            # D. Exit / Risk Check
+
+            # 3. Check for Trend Crossover or RSI exit indicators (Run in polling)
             exit_triggered = False
             exit_reason = ""
             
             if pos_side != "flat" and pos_sz > 0:
                 if pos_side == "long":
-                    sl_val = state.get("stop_loss", 0.0)
-                    tp_val = state.get("take_profit", 0.0)
-                    if sl_val <= 0.0:
-                        if pos_avg_px > 0.0:
-                            logger.warning("⚠️ Long position is active on OKX but stop_loss state is 0.0 or missing! Re-calculating SL/TP based on entry price and current ATR...")
-                            sl = pos_avg_px - SL_ATR_MULT * comp_atr
-                            tp = pos_avg_px + TP_ATR_MULT * comp_atr
-                            state["stop_loss"] = round(sl, 2)
-                            state["take_profit"] = round(tp, 2)
-                            state["position_side"] = "long"
-                            state["position_size"] = pos_sz
-                            save_state(state)
-                            sl_val = state["stop_loss"]
-                            tp_val = state["take_profit"]
-                        else:
-                            logger.error("❌ Long position active but avgPx is 0 — cannot re-calculate SL/TP, skipping exit checks")
-                        
-                    if sl_val > 0.0 and last_close <= sl_val:
-                        exit_triggered = True
-                        exit_reason = "STOP_LOSS_ATR"
-                    elif last_close < curr_ema:
+                    # Check recalculation of missing SL/TP
+                    if context.stop_loss <= 0.0:
+                        sl = pos_avg_px - SL_ATR_MULT * comp_atr
+                        tp = pos_avg_px + TP_ATR_MULT * comp_atr
+                        state["stop_loss"] = round(sl, 2)
+                        state["take_profit"] = round(tp, 2)
+                        state["position_side"] = "long"
+                        state["position_size"] = pos_sz
+                        save_state(state)
+                        context.stop_loss = state["stop_loss"]
+                        context.take_profit = state["take_profit"]
+                    
+                    if context.last_close < curr_ema:
                         exit_triggered = True
                         exit_reason = "EMA_CROSS_EXIT"
                     elif curr_rsi >= RSI_OB_EXIT:
                         exit_triggered = True
                         exit_reason = "RSI_OVERBOUGHT_EXIT"
-                elif pos_side == "short":
-                    sl_val = state.get("stop_loss", 0.0)
-                    tp_val = state.get("take_profit", 0.0)
-                    if sl_val <= 0.0:
-                        if pos_avg_px > 0.0:
-                            logger.warning("⚠️ Short position is active on OKX but stop_loss state is 0.0 or missing! Re-calculating SL/TP based on entry price and current ATR...")
-                            sl = pos_avg_px + SL_ATR_MULT * comp_atr
-                            tp = pos_avg_px - TP_ATR_MULT * comp_atr
-                            state["stop_loss"] = round(sl, 2)
-                            state["take_profit"] = round(tp, 2)
-                            state["position_side"] = "short"
-                            state["position_size"] = pos_sz
-                            save_state(state)
-                            sl_val = state["stop_loss"]
-                            tp_val = state["take_profit"]
-                        else:
-                            logger.error("❌ Short position active but avgPx is 0 — cannot re-calculate SL/TP, skipping exit checks")
                         
-                    if sl_val > 0.0 and last_close >= sl_val:
-                        exit_triggered = True
-                        exit_reason = "STOP_LOSS_ATR"
-                    elif last_close > curr_ema:
+                elif pos_side == "short":
+                    if context.stop_loss <= 0.0:
+                        sl = pos_avg_px + SL_ATR_MULT * comp_atr
+                        tp = pos_avg_px - TP_ATR_MULT * comp_atr
+                        state["stop_loss"] = round(sl, 2)
+                        state["take_profit"] = round(tp, 2)
+                        state["position_side"] = "short"
+                        state["position_size"] = pos_sz
+                        save_state(state)
+                        context.stop_loss = state["stop_loss"]
+                        context.take_profit = state["take_profit"]
+                        
+                    if context.last_close > curr_ema:
                         exit_triggered = True
                         exit_reason = "EMA_CROSS_EXIT"
                     elif curr_rsi <= RSI_OS_EXIT:
@@ -482,298 +508,328 @@ def main_loop():
                         exit_reason = "RSI_OVERSOLD_EXIT"
                         
                 if exit_triggered:
-                    logger.info(f"⚡ EXIT TRIGGERED: {exit_reason} (Close: {last_close:.2f})")
-                    close_side = "sell" if pos_side == "long" else "buy"
-                    close_pos_side = pos_side if pos_mode == "long_short" else "net"
-                    
-                    # Cancel resting TP order if it exists
-                    tp_order_id = state.get("tp_order_id")
-                    if tp_order_id:
-                        logger.info(f"Cancelling resting TP order: {tp_order_id}")
-                        cancel_success = False
-                        for attempt in range(3):
-                            cancel_res = private_request("POST", "/api/v5/trade/cancel-order", json_data={
-                                "instId": inst_id, "ordId": tp_order_id
-                            })
-                            # code "0" indicates success, or "51401" means order does not exist / already canceled
-                            if cancel_res and (cancel_res.get("code") == "0" or cancel_res.get("code") == "51401"):
-                                logger.info(f"TP order cancelled successfully or already inactive (Response: {cancel_res})")
-                                cancel_success = True
-                                break
-                            else:
-                                logger.warning(f"Attempt {attempt+1}/3 to cancel TP order failed: {cancel_res}. Retrying...")
-                                time.sleep(0.5)
-                        
-                        state["tp_order_id"] = ""
-                        save_state(state)
-                        
-                    order_data = {
-                        "instId": inst_id, "tdMode": "isolated",
-                        "side": close_side, "posSide": close_pos_side,
-                        "ordType": "market", "sz": format_size(pos_sz, lot_sz),
-                        "reduceOnly": True
-                    }
-                    
-                    # Try to execute close order with retries
-                    order_executed = False
-                    for attempt in range(5):
-                        res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
-                        logger.info(f"Close attempt {attempt+1} response: {res}")
-                        if res and res.get("code") == "0":
-                            logger.info(f"🎉 Close position order filled successfully on attempt {attempt+1}")
-                            order_executed = True
-                            break
-                        else:
-                            logger.error(f"❌ Attempt {attempt+1}/5 - Close order failed: {res}. Retrying in 1s...")
-                            time.sleep(1)
-                    
-                    if order_executed:
-                        record_trade({
-                            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                            "action": f"CLOSE_{pos_side.upper()}",
-                            "size": pos_sz, "price": last_close, "reason": exit_reason, "response": str(res)
-                        })
-                        state["position_side"] = "flat"
-                        state["stop_loss"] = 0.0
-                        state["take_profit"] = 0.0
-                        state["position_size"] = 0.0
-                        state["last_signal"] = exit_reason.lower()
-                        save_state(state)
-                        pos_side = "flat"
-                        pos_sz = 0.0
-                    else:
-                        logger.critical(f"🚨 CRITICAL: Failed to execute close order on OKX after 5 attempts! Reason: {exit_reason}")
-            
-            # Ensure resting Limit TP order is active on the exchange
+                    await trigger_market_exit(exchange, inst_id, exit_reason)
+                    pos_side = "flat"  # Update local variable
+                    pos_sz = 0.0
+
+            # 4. Ensure Limit TP Order is active
             if pos_side != "flat" and pos_sz > 0 and not exit_triggered:
+                tp_found = False
                 try:
-                    pending_res = private_request("GET", "/api/v5/trade/orders-pending", params={"instId": inst_id})
-                    tp_found = False
-                    tp_order_id = state.get("tp_order_id", "")
+                    pending_orders = await exchange.fetch_open_orders(symbol=context.ccxt_symbol)
+                    for ord in pending_orders:
+                        if ord.get("id") == context.tp_order_id:
+                            tp_found = True
+                            break
                     
-                    if pending_res and pending_res.get("code") == "0":
-                        pending_orders = pending_res.get("data", [])
+                    # Fallback adoption of existing resting limit orders
+                    if not tp_found:
+                        target_side = "sell" if pos_side == "long" else "buy"
+                        target_pos_side = pos_side if context.pos_mode == "long_short" else "net"
                         for ord in pending_orders:
-                            if ord.get("ordId") == tp_order_id:
+                            if (ord.get("type") == "limit" and 
+                                ord.get("side") == target_side and 
+                                ord.get("info", {}).get("posSide") == target_pos_side):
+                                logger.info(f"Adopting existing pending limit order on exchange as TP: {ord.get('id')}")
+                                state["tp_order_id"] = ord.get("id")
+                                save_state(state)
+                                context.tp_order_id = ord.get("id")
                                 tp_found = True
                                 break
-                        
-                        # If not found by ID, check if there's any limit order that looks like our TP order
-                        if not tp_found:
-                            target_side = "sell" if pos_side == "long" else "buy"
-                            target_pos_side = pos_side if pos_mode == "long_short" else "net"
-                            for ord in pending_orders:
-                                if (ord.get("ordType") == "limit" and 
-                                    ord.get("side") == target_side and 
-                                    ord.get("posSide") == target_pos_side):
-                                    logger.info(f"Adopting existing pending limit order on exchange as TP: {ord.get('ordId')}")
-                                    state["tp_order_id"] = ord.get("ordId")
-                                    save_state(state)
-                                    tp_found = True
-                                    break
-                    else:
-                        logger.error(f"Failed to fetch pending orders: {pending_res}")
-                        tp_found = True  # Avoid placing duplicate orders if API request failed
-                    
+                                
                     if not tp_found:
-                        tp_val = state.get("take_profit", 0.0)
+                        # Place new resting limit TP
+                        tp_val = context.take_profit
                         if tp_val <= 0.0:
                             tp = pos_avg_px + (TP_ATR_MULT * comp_atr if pos_side == "long" else -TP_ATR_MULT * comp_atr)
                             state["take_profit"] = round(tp, 2)
                             save_state(state)
-                            tp_val = state["take_profit"]
+                            context.take_profit = state["take_profit"]
+                            tp_val = context.take_profit
                             
                         tp_side = "sell" if pos_side == "long" else "buy"
-                        tp_pos_side = pos_side if pos_mode == "long_short" else "net"
-                        tp_order_data = {
-                            "instId": inst_id, "tdMode": "isolated",
-                            "side": tp_side, "posSide": tp_pos_side,
-                            "ordType": "limit", "px": str(round(tp_val, 2)),
-                            "sz": format_size(pos_sz, lot_sz),
-                            "reduceOnly": True
+                        tp_pos_side = pos_side if context.pos_mode == "long_short" else "net"
+                        
+                        logger.info(f"Resting Limit TP order is missing. Placing new one at price {round(tp_val, 2)}...")
+                        tp_order_params = {
+                            'reduceOnly': True,
+                            'posSide': tp_pos_side,
+                            'tdMode': 'isolated'
                         }
-                        logger.info(f"Resting Limit TP order is missing or cancelled. Placing new one at price {round(tp_val, 2)}...")
-                        tp_res = private_request("POST", "/api/v5/trade/order", json_data=tp_order_data)
+                        
+                        tp_res = await exchange.create_order(
+                            symbol=context.ccxt_symbol,
+                            type='limit',
+                            side=tp_side,
+                            amount=pos_sz,
+                            price=round(tp_val, 2),
+                            params=tp_order_params
+                        )
                         logger.info(f"Place Limit TP response: {tp_res}")
-                        if tp_res and tp_res.get("code") == "0":
-                            state["tp_order_id"] = tp_res["data"][0]["ordId"]
+                        if tp_res:
+                            state["tp_order_id"] = tp_res["id"]
                             save_state(state)
-                        else:
-                            logger.error(f"❌ Failed to re-place resting Limit TP order: {tp_res}")
-                except Exception as tp_ex:
-                    logger.error(f"Error ensuring TP order is active: {tp_ex}")
-            
-            # E. Entry execution
+                            context.tp_order_id = tp_res["id"]
+                except Exception as ex:
+                    logger.error(f"Error ensuring TP order is active: {ex}")
+
+            # 5. Entry Signal Execution
             already_acted = (current_candle_ts == state.get("last_acted_ts", 0))
             
-            if long_entry_signal and not already_acted:
-                logger.info("⚡ Long Entry Signal triggered!")
-                opposite_closed = True
-                if pos_side == "short":
-                    logger.info(f"Closing short (size={pos_sz})...")
-                    close_pos_side = "short" if pos_mode == "long_short" else "net"
-                    order_data = {
-                        "instId": inst_id, "tdMode": "isolated",
-                        "side": "buy", "posSide": close_pos_side,
-                        "ordType": "market", "sz": format_size(pos_sz, lot_sz),
-                        "reduceOnly": True
-                    }
-                    res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
-                    logger.info(f"Close Short response: {res}")
-                    
-                    if res and res.get("code") == "0":
-                        record_trade({
-                            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                            "action": "CLOSE_SHORT", "size": pos_sz, "price": last_close, "response": str(res)
-                        })
-                        pos_side = "flat"
-                        pos_sz = 0.0
-                        time.sleep(2)
-                    else:
-                        logger.error(f"❌ Failed to close opposite Short position: {res}")
-                        opposite_closed = False
-                    
-                if opposite_closed and pos_side != "long":
-                    logger.info(f"Opening Long (size={target_sz})...")
-                    open_pos_side = "long" if pos_mode == "long_short" else "net"
-                    order_data = {
-                        "instId": inst_id, "tdMode": "isolated",
-                        "side": "buy", "posSide": open_pos_side,
-                        "ordType": "market", "sz": format_size(target_sz, lot_sz)
-                    }
-                    res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
-                    logger.info(f"Open Long response: {res}")
-                    
-                    if res and res.get("code") == "0":
-                        sl = last_close - SL_ATR_MULT * comp_atr
-                        tp = last_close + TP_ATR_MULT * comp_atr
+            # Entry Signal logic
+            if (long_entry_signal or short_entry_signal) and not already_acted:
+                async with order_lock:
+                    # Sync balance
+                    try:
+                        balance_res = await exchange.fetch_balance()
+                        avail_balance = float(balance_res.get("USDT", {}).get("free", 0.0))
+                    except Exception as e:
+                        logger.error(f"Failed to fetch balance: {e}")
+                        avail_balance = 0.0
                         
-                        state["last_acted_ts"] = current_candle_ts
-                        state["last_signal"] = "long_entry"
-                        state["position_side"] = "long"
-                        state["position_size"] = target_sz
-                        state["stop_loss"] = round(sl, 2)
-                        state["take_profit"] = round(tp, 2)
-                        state["tp_order_id"] = ""
-                        save_state(state)
-                        
-                        record_trade({
-                            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                            "action": "OPEN_LONG", "size": target_sz, "price": last_close,
-                            "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
-                        })
-                        
-                        # Place resting limit TP order on OKX
-                        tp_side = "sell"
-                        tp_pos_side = "long" if pos_mode == "long_short" else "net"
-                        tp_order_data = {
-                            "instId": inst_id, "tdMode": "isolated",
-                            "side": tp_side, "posSide": tp_pos_side,
-                            "ordType": "limit", "px": str(round(tp, 2)),
-                            "sz": format_size(target_sz, lot_sz),
-                            "reduceOnly": True
-                        }
-                        logger.info(f"Placing resting Limit TP order at price {round(tp, 2)}...")
-                        tp_res = private_request("POST", "/api/v5/trade/order", json_data=tp_order_data)
-                        logger.info(f"Place Limit TP response: {tp_res}")
-                        if tp_res and tp_res.get("code") == "0":
-                            state["tp_order_id"] = tp_res["data"][0]["ordId"]
-                            save_state(state)
-                        else:
-                            logger.error(f"❌ Failed to place resting Limit TP order: {tp_res}")
-                    else:
-                        logger.error(f"❌ Failed to open Long position: {res}")
+                    usable_margin = min(avail_balance, max_capital)
+                    target_value = usable_margin * leverage
+                    raw_sz = target_value / (context.last_close * context.ct_val)
+                    target_sz = max(raw_sz, context.lot_sz)
+                    target_sz = round(target_sz / context.lot_sz) * context.lot_sz
                     
-            elif short_entry_signal and not already_acted:
-                logger.info("⚡ Short Entry Signal triggered!")
-                opposite_closed = True
-                if pos_side == "long":
-                    logger.info(f"Closing long (size={pos_sz})...")
-                    close_pos_side = "long" if pos_mode == "long_short" else "net"
-                    order_data = {
-                        "instId": inst_id, "tdMode": "isolated",
-                        "side": "sell", "posSide": close_pos_side,
-                        "ordType": "market", "sz": format_size(pos_sz, lot_sz),
-                        "reduceOnly": True
-                    }
-                    res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
-                    logger.info(f"Close Long response: {res}")
-                    
-                    if res and res.get("code") == "0":
-                        record_trade({
-                            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                            "action": "CLOSE_LONG", "size": pos_sz, "price": last_close, "response": str(res)
-                        })
-                        pos_side = "flat"
-                        pos_sz = 0.0
-                        time.sleep(2)
-                    else:
-                        logger.error(f"❌ Failed to close opposite Long position: {res}")
-                        opposite_closed = False
-                    
-                if opposite_closed and pos_side != "short":
-                    logger.info(f"Opening Short (size={target_sz})...")
-                    open_pos_side = "short" if pos_mode == "long_short" else "net"
-                    order_data = {
-                        "instId": inst_id, "tdMode": "isolated",
-                        "side": "sell", "posSide": open_pos_side,
-                        "ordType": "market", "sz": format_size(target_sz, lot_sz)
-                    }
-                    res = private_request("POST", "/api/v5/trade/order", json_data=order_data)
-                    logger.info(f"Open Short response: {res}")
-                    
-                    if res and res.get("code") == "0":
-                        sl = last_close + SL_ATR_MULT * comp_atr
-                        tp = last_close - TP_ATR_MULT * comp_atr
-                        
-                        state["last_acted_ts"] = current_candle_ts
-                        state["last_signal"] = "short_entry"
-                        state["position_side"] = "short"
-                        state["position_size"] = target_sz
-                        state["stop_loss"] = round(sl, 2)
-                        state["take_profit"] = round(tp, 2)
-                        state["tp_order_id"] = ""
-                        save_state(state)
-                        
-                        record_trade({
-                            "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
-                            "action": "OPEN_SHORT", "size": target_sz, "price": last_close,
-                            "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(res)
-                        })
-                        
-                        # Place resting limit TP order on OKX
-                        tp_side = "buy"
-                        tp_pos_side = "short" if pos_mode == "long_short" else "net"
-                        tp_order_data = {
-                            "instId": inst_id, "tdMode": "isolated",
-                            "side": tp_side, "posSide": tp_pos_side,
-                            "ordType": "limit", "px": str(round(tp, 2)),
-                            "sz": format_size(target_sz, lot_sz),
-                            "reduceOnly": True
-                        }
-                        logger.info(f"Placing resting Limit TP order at price {round(tp, 2)}...")
-                        tp_res = private_request("POST", "/api/v5/trade/order", json_data=tp_order_data)
-                        logger.info(f"Place Limit TP response: {tp_res}")
-                        if tp_res and tp_res.get("code") == "0":
-                            state["tp_order_id"] = tp_res["data"][0]["ordId"]
-                            save_state(state)
-                        else:
-                            logger.error(f"❌ Failed to place resting Limit TP order: {tp_res}")
-                    else:
-                        logger.error(f"❌ Failed to open Short position: {res}")
-            
+                    if long_entry_signal and pos_side != "long":
+                        logger.info("⚡ Long Entry Signal triggered!")
+                        opposite_closed = True
+                        if pos_side == "short":
+                            logger.info(f"Closing short (size={pos_sz})...")
+                            close_pos_side = "short" if context.pos_mode == "long_short" else "net"
+                            try:
+                                close_res = await exchange.create_order(
+                                    symbol=context.ccxt_symbol,
+                                    type='market',
+                                    side='buy',
+                                    amount=pos_sz,
+                                    price=None,
+                                    params={'reduceOnly': True, 'posSide': close_pos_side, 'tdMode': 'isolated'}
+                                )
+                                record_trade({
+                                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                                    "action": "CLOSE_SHORT", "size": pos_sz, "price": context.last_close, "response": str(close_res)
+                                })
+                                pos_side = "flat"
+                                pos_sz = 0.0
+                                await asyncio.sleep(2)
+                            except Exception as ex:
+                                logger.error(f"❌ Failed to close opposite Short position: {ex}")
+                                opposite_closed = False
+                                
+                        if opposite_closed:
+                            logger.info(f"Opening Long (size={target_sz})...")
+                            open_pos_side = "long" if context.pos_mode == "long_short" else "net"
+                            try:
+                                open_res = await exchange.create_order(
+                                    symbol=context.ccxt_symbol,
+                                    type='market',
+                                    side='buy',
+                                    amount=target_sz,
+                                    price=None,
+                                    params={'posSide': open_pos_side, 'tdMode': 'isolated'}
+                                )
+                                sl = context.last_close - SL_ATR_MULT * comp_atr
+                                tp = context.last_close + TP_ATR_MULT * comp_atr
+                                
+                                state["last_acted_ts"] = current_candle_ts
+                                state["last_signal"] = "long_entry"
+                                state["position_side"] = "long"
+                                state["position_size"] = target_sz
+                                state["stop_loss"] = round(sl, 2)
+                                state["take_profit"] = round(tp, 2)
+                                state["tp_order_id"] = ""
+                                save_state(state)
+                                
+                                record_trade({
+                                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                                    "action": "OPEN_LONG", "size": target_sz, "price": context.last_close,
+                                    "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(open_res)
+                                })
+                                
+                                # Instantly place resting TP
+                                tp_pos_side = "long" if context.pos_mode == "long_short" else "net"
+                                tp_res = await exchange.create_order(
+                                    symbol=context.ccxt_symbol,
+                                    type='limit',
+                                    side='sell',
+                                    amount=target_sz,
+                                    price=round(tp, 2),
+                                    params={'reduceOnly': True, 'posSide': tp_pos_side, 'tdMode': 'isolated'}
+                                )
+                                if tp_res:
+                                    state["tp_order_id"] = tp_res["id"]
+                                    save_state(state)
+                                    
+                            except Exception as ex:
+                                logger.error(f"❌ Failed to open Long position: {ex}")
+                                
+                    elif short_entry_signal and pos_side != "short":
+                        logger.info("⚡ Short Entry Signal triggered!")
+                        opposite_closed = True
+                        if pos_side == "long":
+                            logger.info(f"Closing long (size={pos_sz})...")
+                            close_pos_side = "long" if context.pos_mode == "long_short" else "net"
+                            try:
+                                close_res = await exchange.create_order(
+                                    symbol=context.ccxt_symbol,
+                                    type='market',
+                                    side='sell',
+                                    amount=pos_sz,
+                                    price=None,
+                                    params={'reduceOnly': True, 'posSide': close_pos_side, 'tdMode': 'isolated'}
+                                )
+                                record_trade({
+                                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                                    "action": "CLOSE_LONG", "size": pos_sz, "price": context.last_close, "response": str(close_res)
+                                })
+                                pos_side = "flat"
+                                pos_sz = 0.0
+                                await asyncio.sleep(2)
+                            except Exception as ex:
+                                logger.error(f"❌ Failed to close opposite Long position: {ex}")
+                                opposite_closed = False
+                                
+                        if opposite_closed:
+                            logger.info(f"Opening Short (size={target_sz})...")
+                            open_pos_side = "short" if context.pos_mode == "long_short" else "net"
+                            try:
+                                open_res = await exchange.create_order(
+                                    symbol=context.ccxt_symbol,
+                                    type='market',
+                                    side='sell',
+                                    amount=target_sz,
+                                    price=None,
+                                    params={'posSide': open_pos_side, 'tdMode': 'isolated'}
+                                )
+                                sl = context.last_close + SL_ATR_MULT * comp_atr
+                                tp = context.last_close - TP_ATR_MULT * comp_atr
+                                
+                                state["last_acted_ts"] = current_candle_ts
+                                state["last_signal"] = "short_entry"
+                                state["position_side"] = "short"
+                                state["position_size"] = target_sz
+                                state["stop_loss"] = round(sl, 2)
+                                state["take_profit"] = round(tp, 2)
+                                state["tp_order_id"] = ""
+                                save_state(state)
+                                
+                                record_trade({
+                                    "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+                                    "action": "OPEN_SHORT", "size": target_sz, "price": context.last_close,
+                                    "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(open_res)
+                                })
+                                
+                                # Instantly place resting TP
+                                tp_pos_side = "short" if context.pos_mode == "long_short" else "net"
+                                tp_res = await exchange.create_order(
+                                    symbol=context.ccxt_symbol,
+                                    type='limit',
+                                    side='buy',
+                                    amount=target_sz,
+                                    price=round(tp, 2),
+                                    params={'reduceOnly': True, 'posSide': tp_pos_side, 'tdMode': 'isolated'}
+                                )
+                                if tp_res:
+                                    state["tp_order_id"] = tp_res["id"]
+                                    save_state(state)
+                                    
+                            except Exception as ex:
+                                logger.error(f"❌ Failed to open Short position: {ex}")
+                                
             elif (long_entry_signal or short_entry_signal) and already_acted:
                 logger.info(f"⚠️ Entry signal on candle ts={current_candle_ts} but ALREADY ACTED - skipping")
             else:
-                logger.info("No signal detected. Keeping current state.")
+                logger.info("No entry signal detected. Keeping current state.")
                 
         except Exception as ex:
-            logger.error(f"Error in main loop: {ex}", exc_info=True)
+            logger.error(f"Error in main polling loop: {ex}", exc_info=True)
             
-        time.sleep(60)
+        await asyncio.sleep(30)  # Polling every 30 seconds
+
+# ────────────────────────────────────────────────────────────
+# Global Exchange Init and main task orchestrator
+# ────────────────────────────────────────────────────────────
+global_exchange = None
+
+async def main():
+    global global_exchange
+    inst_id = "ANTHROPIC-USDT-SWAP"
+    leverage = 3
+    
+    # Init Exchange via CCXT
+    global_exchange = ccxt_async.okx({
+        'apiKey': API_KEY,
+        'secret': SECRET_KEY,
+        'password': PASSPHRASE,
+        'enableRateLimit': True,
+        'options': {
+            'defaultType': 'swap',
+        }
+    })
+    
+    if SIMULATED:
+        global_exchange.set_sandbox_mode(True)
+        
+    logger.info(f"Connecting to OKX environment: {ENV_TYPE} via CCXT...")
+    
+    # 1. Load symbols mapping
+    try:
+        await global_exchange.load_markets()
+        ccxt_symbol = None
+        for sym, market in global_exchange.markets.items():
+            if market['id'] == inst_id:
+                ccxt_symbol = sym
+                break
+        if not ccxt_symbol:
+            # Fallback format
+            ccxt_symbol = inst_id.replace('-SWAP', '').replace('-', '/') + ':USDT'
+            
+        context.ccxt_symbol = ccxt_symbol
+        market_info = global_exchange.market(ccxt_symbol)
+        context.ct_val = float(market_info.get("contractSize", 1.0))
+        context.lot_sz = float(market_info.get("limits", {}).get("amount", {}).get("min", 1.0))
+        logger.info(f"Instrument loaded: symbol={ccxt_symbol}, ctVal={context.ct_val}, lotSz={context.lot_sz}")
+    except Exception as e:
+        logger.error(f"Failed to fetch market specifications from OKX: {e}")
+        sys.exit(1)
+        
+    # 2. Position account mode setup
+    try:
+        acct_config = await global_exchange.privateGetAccountConfig()
+        if acct_config and acct_config.get("code") == "0" and acct_config.get("data"):
+            context.pos_mode = acct_config["data"][0].get("posMode", "net_mode")
+            logger.info(f"Current Position Mode on OKX Account: {context.pos_mode}")
+    except Exception as e:
+        logger.warning(f"Could not load account config: {e}")
+        
+    # 3. Setup leverage
+    try:
+        lev_res = await global_exchange.privatePostAccountSetLeverage({
+            "instId": inst_id,
+            "lever": str(leverage),
+            "mgnMode": "isolated"
+        })
+        logger.info(f"Leverage setup configuration response: {lev_res}")
+    except Exception as e:
+        logger.warning(f"Leverage setup configuration bypassed or already configured: {e}")
+
+    # Launch WebSocket listener and main polling loop concurrently
+    await asyncio.gather(
+        websocket_listener(inst_id),
+        main_polling_loop(global_exchange, inst_id)
+    )
 
 if __name__ == "__main__":
     try:
-        main_loop()
+        asyncio.run(main())
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
+    finally:
+        # Close exchange connection gracefully
+        if global_exchange:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(global_exchange.close())
