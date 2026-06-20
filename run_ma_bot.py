@@ -129,7 +129,14 @@ def private_request(method: str, path: str, params: dict = None, json_data: dict
     if json_data:
         body = json.dumps(json_data)
         
-    headers = get_okx_headers(method, path, body)
+    request_path = path
+    if method == "GET" and params:
+        from urllib.parse import urlencode
+        # Sort or encode the params to construct the exact query string OKX expects
+        query_string = urlencode(params)
+        request_path = f"{path}?{query_string}"
+        
+    headers = get_okx_headers(method, request_path, body)
     
     try:
         if method == "GET":
