@@ -435,10 +435,10 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                         context.stop_loss = state["stop_loss"]
                         context.take_profit = state["take_profit"]
                     
-                    if context.last_close < curr_ema:
+                    if comp_close < comp_ema:
                         exit_triggered = True
                         exit_reason = "EMA_CROSS_EXIT"
-                    elif curr_rsi >= RSI_OB_EXIT:
+                    elif comp_rsi >= RSI_OB_EXIT:
                         exit_triggered = True
                         exit_reason = "RSI_OVERBOUGHT_EXIT"
                         
@@ -454,10 +454,10 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                         context.stop_loss = state["stop_loss"]
                         context.take_profit = state["take_profit"]
                         
-                    if context.last_close > curr_ema:
+                    if comp_close > comp_ema:
                         exit_triggered = True
                         exit_reason = "EMA_CROSS_EXIT"
-                    elif curr_rsi <= RSI_OS_EXIT:
+                    elif comp_rsi <= RSI_OS_EXIT:
                         exit_triggered = True
                         exit_reason = "RSI_OVERSOLD_EXIT"
                         
