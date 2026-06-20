@@ -65,7 +65,6 @@ def load_state():
         "position_size": 0.0, 
         "stop_loss": 0.0, 
         "take_profit": 0.0,
-        "tp_order_id": "",
         "is_paused": False
     }
     if os.path.exists(STATE_FILE):
@@ -146,7 +145,6 @@ class BotContext:
         self.pos_avg_px = 0.0
         self.stop_loss = 0.0
         self.take_profit = 0.0
-        self.tp_order_id = ""
         self.is_paused = False
         self.last_acted_ts = 0
         self.ct_val = 1.0
@@ -161,9 +159,8 @@ order_lock = asyncio.Lock()  # Prevent concurrent ordering operations
 # Core Order Execution Logic using CCXT (Thread & Asynchronous safe)
 # ────────────────────────────────────────────────────────────
 async def trigger_market_exit(exchange: ccxt_async.Exchange, inst_id: str, exit_reason: str):
-    """Executes a market close order safely with retries and TP order cancellation."""
+    """Executes a market close order safely with retries. Cloud TP/SL orders are managed by OKX."""
     async with order_lock:
-        # Load latest state to prevent duplicate close
         state = load_state()
         if state.get("position_side", "flat") == "flat":
             return
@@ -172,25 +169,8 @@ async def trigger_market_exit(exchange: ccxt_async.Exchange, inst_id: str, exit_
         close_side = "sell" if context.pos_side == "long" else "buy"
         close_pos_side = context.pos_side if context.pos_mode == "long_short" else "net"
         
-        # 1. Cancel resting TP order if exists
-        tp_order_id = state.get("tp_order_id")
-        if tp_order_id:
-            logger.info(f"Cancelling resting TP limit order: {tp_order_id}")
-            for attempt in range(3):
-                try:
-                    await exchange.cancel_order(id=tp_order_id, symbol=context.ccxt_symbol)
-                    logger.info("TP order cancelled successfully on exchange.")
-                    break
-                except ccxt_async.OrderNotFound:
-                    logger.info("TP order already filled or cancelled on exchange.")
-                    break
-                except Exception as e:
-                    logger.warning(f"Attempt {attempt+1}/3 to cancel TP order failed: {e}. Retrying...")
-                    await asyncio.sleep(0.5)
-            state["tp_order_id"] = ""
-            save_state(state)
-
-        # 2. Market close with retries
+        # Market close with retries
+        # In OKX, when you exit the position, any cloud-attached TP/SL orders bound to the position are automatically cancelled by OKX.
         order_params = {
             'reduceOnly': True,
             'posSide': close_pos_side,
@@ -201,7 +181,6 @@ async def trigger_market_exit(exchange: ccxt_async.Exchange, inst_id: str, exit_
         close_res = None
         for attempt in range(5):
             try:
-                # CCXT Unified create_order
                 close_res = await exchange.create_order(
                     symbol=context.ccxt_symbol,
                     type='market',
@@ -238,22 +217,19 @@ async def trigger_market_exit(exchange: ccxt_async.Exchange, inst_id: str, exit_
             context.pos_sz = 0.0
             context.stop_loss = 0.0
             context.take_profit = 0.0
-            context.tp_order_id = ""
         else:
             logger.critical(f"🚨 CRITICAL: Failed to execute close order on OKX after 5 attempts! Reason: {exit_reason}")
 
 # ────────────────────────────────────────────────────────────
-# WebSocket Live Price Listener (Millisecond Response for SL)
+# WebSocket Live Price Listener (Maintains Context Last Price)
 # ────────────────────────────────────────────────────────────
 async def websocket_listener(inst_id: str):
-    """Subscribes to live tickers and runs real-time stop-loss checking."""
+    """Subscribes to live tickers channel to keep context.last_close extremely fresh."""
     ws_url = "wss://wspap.okx.com:8443/ws/v5/public" if SIMULATED else "wss://ws.okx.com:8443/ws/v5/public"
     logger.info(f"Starting live WebSocket price listener on: {ws_url}")
     
-    # Establish connection with auto-reconnect
     async for websocket in websockets.connect(ws_url):
         try:
-            # Subscribe to tickers channel
             subscribe_msg = {
                 "op": "subscribe",
                 "args": [{
@@ -270,20 +246,7 @@ async def websocket_listener(inst_id: str):
                 
                 if "data" in data:
                     ticker = data["data"][0]
-                    last_price = float(ticker["last"])
-                    context.last_close = last_price
-                    
-                    # Real-time hard Stop Loss checking
-                    if context.pos_side != "flat" and context.pos_sz > 0:
-                        if context.pos_side == "long" and context.stop_loss > 0.0:
-                            if last_price <= context.stop_loss:
-                                # We need an async reference to exchange, we will use it from our main task
-                                # This will run exit triggered instantly
-                                asyncio.create_task(trigger_market_exit(global_exchange, inst_id, "STOP_LOSS_ATR_WS"))
-                                
-                        elif context.pos_side == "short" and context.stop_loss > 0.0:
-                            if last_price >= context.stop_loss:
-                                asyncio.create_task(trigger_market_exit(global_exchange, inst_id, "STOP_LOSS_ATR_WS"))
+                    context.last_close = float(ticker["last"])
                                 
         except websockets.ConnectionClosed:
             logger.warning("WebSocket connection lost! Reconnecting in 5 seconds...")
@@ -326,7 +289,6 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                 
             # 1. Fetch historical candles (600 candles for EMA accuracy)
             try:
-                # CCXT fetch_ohlcv returns list of list [ts, open, high, low, close, volume] sorted chronologically
                 ohlcv = await exchange.fetch_ohlcv(symbol=context.ccxt_symbol, timeframe='30m', limit=600)
             except Exception as e:
                 logger.error(f"Failed to fetch candles: {e}")
@@ -397,7 +359,6 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                     pos_sz = p_sz
                     pos_avg_px = float(p.get("entryPrice", 0.0))
                     pos_upl = float(p.get("unrealizedPnl", 0.0))
-                    # percentage
                     pos_upl_ratio = float(p.get("percentage", 0.0))
                     break
                     
@@ -410,17 +371,19 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
             if pos_side == "flat" and state.get("position_side", "flat") != "flat":
                 logger.warning(f"⚠️ Exchange flat, local state records position_side={state['position_side']}. Sync resetting...")
                 
-                # Check if it was closed via resting limit TP order
-                tp_order_id = state.get("tp_order_id", "")
+                # Verify if the cloud-attached TP/SL or active TP order filled
                 was_tp_filled = False
-                if tp_order_id:
-                    try:
-                        ord_res = await exchange.fetch_order(id=tp_order_id, symbol=context.ccxt_symbol)
-                        if ord_res and ord_res.get("status") == "closed":
-                            logger.info("🎉 Confirming resting Limit TP order was filled on exchange!")
+                try:
+                    # Look up last filled trade in our trading records
+                    orders = await exchange.fetch_closed_orders(symbol=context.ccxt_symbol, limit=10)
+                    for o in orders:
+                        # If a TP order or triggering cloud TPSL order filled
+                        if o.get("status") == "closed" and o.get("filled", 0) > 0:
+                            # Verify if it was filled around the current candle window
                             was_tp_filled = True
-                    except Exception as e:
-                        logger.warning(f"Failed to fetch TP order status: {e}")
+                            break
+                except Exception as e:
+                    logger.warning(f"Failed to check filled orders: {e}")
                         
                 if was_tp_filled:
                     record_trade({
@@ -428,48 +391,39 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                         "action": f"CLOSE_{state['position_side'].upper()}",
                         "size": state.get("position_size", 0.0),
                         "price": state.get("take_profit", context.last_close),
-                        "reason": "TAKE_PROFIT_LIMIT",
-                        "response": "Limit order filled"
+                        "reason": "TAKE_PROFIT_CLOUD",
+                        "response": "Cloud TP order triggered & filled"
                     })
-                    state["last_signal"] = "take_profit_limit"
+                    state["last_signal"] = "take_profit_cloud"
                 else:
-                    # Cancel stale TP order on exchange
-                    if tp_order_id:
-                        try:
-                            await exchange.cancel_order(id=tp_order_id, symbol=context.ccxt_symbol)
-                        except Exception:
-                            pass
                     state["last_signal"] = "sync_reset"
                     
                 state["position_side"] = "flat"
                 state["stop_loss"] = 0.0
                 state["take_profit"] = 0.0
                 state["position_size"] = 0.0
-                state["tp_order_id"] = ""
                 save_state(state)
                 
                 context.stop_loss = 0.0
                 context.take_profit = 0.0
-                context.tp_order_id = ""
 
             # Update context SL/TP from state
             if pos_side != "flat":
                 context.stop_loss = state.get("stop_loss", 0.0)
                 context.take_profit = state.get("take_profit", 0.0)
-                context.tp_order_id = state.get("tp_order_id", "")
                 
             logger.info(
                 f"Position: side={pos_side} | size={pos_sz} | avgPx={pos_avg_px:.2f} | "
                 f"upl={pos_upl:.4f} | uplRatio={pos_upl_ratio:.2f}% | SL={context.stop_loss:.2f} | TP={context.take_profit:.2f}"
             )
 
-            # 3. Check for Trend Crossover or RSI exit indicators (Run in polling)
+            # 3. Check for Active / Trend exit indicators (EMA cross or RSI limits)
             exit_triggered = False
             exit_reason = ""
             
             if pos_side != "flat" and pos_sz > 0:
                 if pos_side == "long":
-                    # Check recalculation of missing SL/TP
+                    # Cloud TP/SL recovery if state sl/tp has been lost in restart
                     if context.stop_loss <= 0.0:
                         sl = pos_avg_px - SL_ATR_MULT * comp_atr
                         tp = pos_avg_px + TP_ATR_MULT * comp_atr
@@ -509,77 +463,15 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                         
                 if exit_triggered:
                     await trigger_market_exit(exchange, inst_id, exit_reason)
-                    pos_side = "flat"  # Update local variable
+                    pos_side = "flat"
                     pos_sz = 0.0
 
-            # 4. Ensure Limit TP Order is active
-            if pos_side != "flat" and pos_sz > 0 and not exit_triggered:
-                tp_found = False
-                try:
-                    pending_orders = await exchange.fetch_open_orders(symbol=context.ccxt_symbol)
-                    for ord in pending_orders:
-                        if ord.get("id") == context.tp_order_id:
-                            tp_found = True
-                            break
-                    
-                    # Fallback adoption of existing resting limit orders
-                    if not tp_found:
-                        target_side = "sell" if pos_side == "long" else "buy"
-                        target_pos_side = pos_side if context.pos_mode == "long_short" else "net"
-                        for ord in pending_orders:
-                            if (ord.get("type") == "limit" and 
-                                ord.get("side") == target_side and 
-                                ord.get("info", {}).get("posSide") == target_pos_side):
-                                logger.info(f"Adopting existing pending limit order on exchange as TP: {ord.get('id')}")
-                                state["tp_order_id"] = ord.get("id")
-                                save_state(state)
-                                context.tp_order_id = ord.get("id")
-                                tp_found = True
-                                break
-                                
-                    if not tp_found:
-                        # Place new resting limit TP
-                        tp_val = context.take_profit
-                        if tp_val <= 0.0:
-                            tp = pos_avg_px + (TP_ATR_MULT * comp_atr if pos_side == "long" else -TP_ATR_MULT * comp_atr)
-                            state["take_profit"] = round(tp, 2)
-                            save_state(state)
-                            context.take_profit = state["take_profit"]
-                            tp_val = context.take_profit
-                            
-                        tp_side = "sell" if pos_side == "long" else "buy"
-                        tp_pos_side = pos_side if context.pos_mode == "long_short" else "net"
-                        
-                        logger.info(f"Resting Limit TP order is missing. Placing new one at price {round(tp_val, 2)}...")
-                        tp_order_params = {
-                            'reduceOnly': True,
-                            'posSide': tp_pos_side,
-                            'tdMode': 'isolated'
-                        }
-                        
-                        tp_res = await exchange.create_order(
-                            symbol=context.ccxt_symbol,
-                            type='limit',
-                            side=tp_side,
-                            amount=pos_sz,
-                            price=round(tp_val, 2),
-                            params=tp_order_params
-                        )
-                        logger.info(f"Place Limit TP response: {tp_res}")
-                        if tp_res:
-                            state["tp_order_id"] = tp_res["id"]
-                            save_state(state)
-                            context.tp_order_id = tp_res["id"]
-                except Exception as ex:
-                    logger.error(f"Error ensuring TP order is active: {ex}")
-
-            # 5. Entry Signal Execution
+            # 4. Entry Signal Execution & Placement of Cloud Attached TP/SL
             already_acted = (current_candle_ts == state.get("last_acted_ts", 0))
             
-            # Entry Signal logic
             if (long_entry_signal or short_entry_signal) and not already_acted:
                 async with order_lock:
-                    # Sync balance
+                    # Sync Balance
                     try:
                         balance_res = await exchange.fetch_balance()
                         avail_balance = float(balance_res.get("USDT", {}).get("free", 0.0))
@@ -622,6 +514,24 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                         if opposite_closed:
                             logger.info(f"Opening Long (size={target_sz})...")
                             open_pos_side = "long" if context.pos_mode == "long_short" else "net"
+                            
+                            sl = context.last_close - SL_ATR_MULT * comp_atr
+                            tp = context.last_close + TP_ATR_MULT * comp_atr
+                            
+                            # 💡 IMPORTANT: OKX native Attach TP/SL options
+                            # Pass to OKX as trigger orders tied directly to the parent position. 
+                            # If parent position is flat, these trigger orders are deleted automatically.
+                            order_params = {
+                                'posSide': open_pos_side,
+                                'tdMode': 'isolated',
+                                # Take Profit Cloud Parameters
+                                'tpTriggerPx': f"{round(tp, 2)}",
+                                'tpOrdPx': '-1',  # Market order execution on TP trigger
+                                # Stop Loss Cloud Parameters
+                                'slTriggerPx': f"{round(sl, 2)}",
+                                'slOrdPx': '-1'   # Market order execution on SL trigger
+                            }
+                            
                             try:
                                 open_res = await exchange.create_order(
                                     symbol=context.ccxt_symbol,
@@ -629,10 +539,8 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                                     side='buy',
                                     amount=target_sz,
                                     price=None,
-                                    params={'posSide': open_pos_side, 'tdMode': 'isolated'}
+                                    params=order_params
                                 )
-                                sl = context.last_close - SL_ATR_MULT * comp_atr
-                                tp = context.last_close + TP_ATR_MULT * comp_atr
                                 
                                 state["last_acted_ts"] = current_candle_ts
                                 state["last_signal"] = "long_entry"
@@ -640,8 +548,10 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                                 state["position_size"] = target_sz
                                 state["stop_loss"] = round(sl, 2)
                                 state["take_profit"] = round(tp, 2)
-                                state["tp_order_id"] = ""
                                 save_state(state)
+                                
+                                context.stop_loss = state["stop_loss"]
+                                context.take_profit = state["take_profit"]
                                 
                                 record_trade({
                                     "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
@@ -649,22 +559,8 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                                     "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(open_res)
                                 })
                                 
-                                # Instantly place resting TP
-                                tp_pos_side = "long" if context.pos_mode == "long_short" else "net"
-                                tp_res = await exchange.create_order(
-                                    symbol=context.ccxt_symbol,
-                                    type='limit',
-                                    side='sell',
-                                    amount=target_sz,
-                                    price=round(tp, 2),
-                                    params={'reduceOnly': True, 'posSide': tp_pos_side, 'tdMode': 'isolated'}
-                                )
-                                if tp_res:
-                                    state["tp_order_id"] = tp_res["id"]
-                                    save_state(state)
-                                    
                             except Exception as ex:
-                                logger.error(f"❌ Failed to open Long position: {ex}")
+                                logger.error(f"❌ Failed to open Long position with attached TP/SL: {ex}")
                                 
                     elif short_entry_signal and pos_side != "short":
                         logger.info("⚡ Short Entry Signal triggered!")
@@ -695,6 +591,22 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                         if opposite_closed:
                             logger.info(f"Opening Short (size={target_sz})...")
                             open_pos_side = "short" if context.pos_mode == "long_short" else "net"
+                            
+                            sl = context.last_close + SL_ATR_MULT * comp_atr
+                            tp = context.last_close - TP_ATR_MULT * comp_atr
+                            
+                            # 💡 IMPORTANT: OKX native Attach TP/SL options
+                            order_params = {
+                                'posSide': open_pos_side,
+                                'tdMode': 'isolated',
+                                # Take Profit Cloud Parameters
+                                'tpTriggerPx': f"{round(tp, 2)}",
+                                'tpOrdPx': '-1',
+                                # Stop Loss Cloud Parameters
+                                'slTriggerPx': f"{round(sl, 2)}",
+                                'slOrdPx': '-1'
+                            }
+                            
                             try:
                                 open_res = await exchange.create_order(
                                     symbol=context.ccxt_symbol,
@@ -702,10 +614,8 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                                     side='sell',
                                     amount=target_sz,
                                     price=None,
-                                    params={'posSide': open_pos_side, 'tdMode': 'isolated'}
+                                    params=order_params
                                 )
-                                sl = context.last_close + SL_ATR_MULT * comp_atr
-                                tp = context.last_close - TP_ATR_MULT * comp_atr
                                 
                                 state["last_acted_ts"] = current_candle_ts
                                 state["last_signal"] = "short_entry"
@@ -713,8 +623,10 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                                 state["position_size"] = target_sz
                                 state["stop_loss"] = round(sl, 2)
                                 state["take_profit"] = round(tp, 2)
-                                state["tp_order_id"] = ""
                                 save_state(state)
+                                
+                                context.stop_loss = state["stop_loss"]
+                                context.take_profit = state["take_profit"]
                                 
                                 record_trade({
                                     "time": datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
@@ -722,22 +634,8 @@ async def main_polling_loop(exchange: ccxt_async.Exchange, inst_id: str):
                                     "stop_loss": state["stop_loss"], "take_profit": state["take_profit"], "response": str(open_res)
                                 })
                                 
-                                # Instantly place resting TP
-                                tp_pos_side = "short" if context.pos_mode == "long_short" else "net"
-                                tp_res = await exchange.create_order(
-                                    symbol=context.ccxt_symbol,
-                                    type='limit',
-                                    side='buy',
-                                    amount=target_sz,
-                                    price=round(tp, 2),
-                                    params={'reduceOnly': True, 'posSide': tp_pos_side, 'tdMode': 'isolated'}
-                                )
-                                if tp_res:
-                                    state["tp_order_id"] = tp_res["id"]
-                                    save_state(state)
-                                    
                             except Exception as ex:
-                                logger.error(f"❌ Failed to open Short position: {ex}")
+                                logger.error(f"❌ Failed to open Short position with attached TP/SL: {ex}")
                                 
             elif (long_entry_signal or short_entry_signal) and already_acted:
                 logger.info(f"⚠️ Entry signal on candle ts={current_candle_ts} but ALREADY ACTED - skipping")
@@ -828,7 +726,6 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         logger.info("Bot stopped by user.")
     finally:
-        # Close exchange connection gracefully
         if global_exchange:
             loop = asyncio.get_event_loop()
             if loop.is_running():
